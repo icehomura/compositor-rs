@@ -217,7 +217,7 @@ impl Canvas {
 
     /// Clips everything away, `CGContext.clip(to: .zero)`.
     pub fn clip_to_zero(&mut self) {
-        self.intersect_clip(Coverage::empty(self.pixel_size()));
+        self.intersect_clip(Coverage::empty());
     }
 
     pub fn set_fill_color(&mut self, color: PaletteColor) {
@@ -448,7 +448,7 @@ impl Canvas {
 
     fn image_coverage(&self, image: &Gray8Image, rect: Rect) -> Coverage {
         if rect.is_empty() || image.is_empty() {
-            return Coverage::empty(self.pixel_size());
+            return Coverage::empty();
         }
         if image.width() == 1 && image.height() == 1 {
             // A uniform mask keeps the same shape at full coverage.
@@ -671,9 +671,11 @@ struct Coverage {
 }
 
 impl Coverage {
-    fn empty(size: Size) -> Self {
+    /// No coverage at all: a null rectangle with no buffer. `at` reports zero everywhere and
+    /// `is_empty`-style callers treat it as nothing painted.
+    fn empty() -> Self {
         Coverage {
-            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            rect: Rect::NULL,
             values: Vec::new(),
         }
     }
@@ -684,7 +686,7 @@ impl Coverage {
         let width = rect.width().max(0.0) as usize;
         let height = rect.height().max(0.0) as usize;
         if width == 0 || height == 0 {
-            return Coverage::empty(Size::ZERO);
+            return Coverage::empty();
         }
         Coverage {
             rect,
@@ -695,7 +697,7 @@ impl Coverage {
     fn uniform(rect: Rect, value: f64, size: Size) -> Self {
         let clipped = rect.integral().intersection(Rect::from_origin_size(Point::ZERO, size));
         if clipped.is_empty() {
-            return Coverage::empty(size);
+            return Coverage::empty();
         }
         let width = clipped.width().max(0.0) as usize;
         let height = clipped.height().max(0.0) as usize;
@@ -713,6 +715,9 @@ impl Coverage {
     }
 
     fn at(&self, x: i64, y: i64) -> f64 {
+        if self.rect.is_null() {
+            return 0.0;
+        }
         let local_x = x - self.rect.min_x() as i64;
         let local_y = y - self.rect.min_y() as i64;
         if local_x < 0 || local_y < 0 || local_x as usize >= self.rect.width() as usize || local_y as usize >= self.rect.height() as usize {
@@ -731,7 +736,11 @@ impl Coverage {
 
 impl Clip {
     fn coverage_at(&self, x: i64, y: i64) -> f64 {
-        if x < self.rect.min_x() as i64 || y < self.rect.min_y() as i64 {
+        if x < self.rect.min_x() as i64
+            || y < self.rect.min_y() as i64
+            || x >= self.rect.max_x() as i64
+            || y >= self.rect.max_y() as i64
+        {
             return 0.0;
         }
         match &self.mask {
@@ -910,14 +919,14 @@ fn rasterize_polygons(polygons: &[Subpath], rule: FillRule, antialias: bool, siz
         }
     }
     if !min_y.is_finite() || !max_y.is_finite() {
-        return Coverage::empty(size);
+        return Coverage::empty();
     }
     let top = min_y.floor().max(0.0);
     let bottom = max_y.ceil().min(size.height);
     let left = min_x.floor().max(0.0);
     let right = max_x.ceil().min(size.width);
     if bottom <= top || right <= left {
-        return Coverage::empty(size);
+        return Coverage::empty();
     }
     let width = (right - left) as usize;
     let height = (bottom - top) as usize;
