@@ -40,7 +40,7 @@
 //! * **Line breaking.** `.byWordWrapping` is a greedy break at whitespace runs (the whitespace is
 //!   dropped, as Core Text hangs it) and before ideographs, with a word wider than the container
 //!   broken by character; Core Text follows UAX #14, whose other break opportunities (hyphens,
-//!   punctuation) are not reproduced.
+//!   punctuation) are not reproduced. A non-breaking space never breaks.
 //! * **Alignment.** The line is flushed inside the container by its advance, without Core Text's
 //!   flush-factor clamping for a line wider than the container.
 //! * **Antialiasing.** fontdue returns a coverage bitmap of the glyph's floor-pixel box with the
@@ -333,10 +333,6 @@ pub struct TextLayout {
     /// Whether the content needed more lines than the container's height holds.
     pub truncated: bool,
     faces: Vec<Face>,
-    /// The style's own face, which text outside a run is set in.
-    base_face: usize,
-    /// The index of the face `NSFont.systemFont` resolves to, which missing glyphs fall back to.
-    default_face: usize,
     /// The style's font size, the size the glyphs rasterize at.
     font_size: f32,
     /// The number of UTF-16 units in the content.
@@ -421,8 +417,6 @@ impl TextLayout {
             lines,
             truncated,
             faces: faces.list,
-            base_face: faces.base,
-            default_face: faces.default,
             font_size: faces.size,
             units: content_units(&style.content),
         }
@@ -488,7 +482,8 @@ impl TextLayout {
 
     /// The insertion point's rect at `offset`: one pixel wide and the line fragment's full height,
     /// as `NSTextView`'s caret is with the style's fixed line height. Offsets outside the content
-    /// clamp to its ends.
+    /// clamp to its ends, and an offset inside whitespace a soft break dropped sits at the end of
+    /// the line it was dropped from.
     pub fn caret_rect(&self, offset: isize) -> Rect {
         let Some(line) = self.lines.get(self.line_index(offset)) else {
             return Rect::new(self.padding, self.padding, 1.0, self.line_height);
@@ -728,9 +723,9 @@ impl WrappedLine {
     /// line's ascent and descent from the runs it holds. An empty line is set in the style's own
     /// face, as the paragraph's font is.
     fn totals(&mut self, faces: &Faces, tracking: f64) {
-        let mut advance = 0.0;
-        let mut ascent = 0.0;
-        let mut descent = 0.0;
+        let mut advance: f64 = 0.0;
+        let mut ascent: f64 = 0.0;
+        let mut descent: f64 = 0.0;
         for item in &self.items {
             advance += item.advance + tracking;
             ascent = ascent.max(faces.list[item.face].metrics.ascent);
@@ -769,7 +764,7 @@ impl Faces {
         let mut names: HashMap<String, usize> = HashMap::new();
         // Two names can resolve to the same face — a missing name and the system font — and one
         // entry per resolved face keeps the glyphs' face indices meaningful.
-        let mut index_of = |name: &str, list: &mut Vec<Face>, names: &mut HashMap<String, usize>| -> usize {
+        let index_of = |name: &str, list: &mut Vec<Face>, names: &mut HashMap<String, usize>| -> usize {
             if let Some(index) = names.get(name) {
                 return *index;
             }
@@ -900,8 +895,16 @@ fn flush_paragraph(
 ) {
     let ranges = wrap_paragraph(items, container_width, tracking);
     let last = ranges.len().saturating_sub(1);
+    // The ranges index the paragraph's items; the vector shrinks as the lines are taken. Each line
+    // first drops the whitespace the break before it left behind, then takes its own items.
+    let mut consumed = 0usize;
     for (position, (range_start, range_end)) in ranges.into_iter().enumerate() {
-        let line_items: Vec<Item> = items.drain(..range_end - range_start).collect();
+        if range_start > consumed {
+            items.drain(..range_start - consumed);
+            consumed = range_start;
+        }
+        let line_items: Vec<Item> = items.drain(..range_end - consumed).collect();
+        consumed = range_end;
         let range = match (line_items.first(), line_items.last()) {
             (Some(first), Some(last)) => TextRange::new(
                 first.utf16_offset,
@@ -951,13 +954,16 @@ fn wrap_paragraph(items: &mut [Item], container_width: f64, tracking: f64) -> Ve
                 _ => index,
             };
             ranges.push((start, trim_trailing_whitespace(items, start, break_at)));
+            // The break can be at a whitespace opportunity behind the item that overflowed: the
+            // items it passed over belong to the new line, so they are measured again.
             start = break_at;
+            index = break_at;
             pen = 0.0;
             opportunity = None;
             continue;
         }
         pen += width;
-        if items[index].character.is_whitespace() {
+        if is_breakable_space(items[index].character) {
             opportunity = Some(index + 1);
         } else if index > start
             && is_ideographic(items[index].character)
@@ -974,10 +980,16 @@ fn wrap_paragraph(items: &mut [Item], container_width: f64, tracking: f64) -> Ve
 /// Where a line that breaks at `end` really ends: the whitespace it broke at is dropped.
 fn trim_trailing_whitespace(items: &[Item], start: usize, end: usize) -> usize {
     let mut end = end;
-    while end > start && items[end - 1].character.is_whitespace() {
+    while end > start && is_breakable_space(items[end - 1].character) {
         end -= 1;
     }
     end
+}
+
+/// Whether a line may break at `character`: a space, but never a non-breaking one, which Core Text
+/// keeps on the line it started on.
+fn is_breakable_space(character: char) -> bool {
+    character.is_whitespace() && character != '\u{00A0}'
 }
 
 /// A paragraph break: the characters `NSString.lineRange` treats as line separators.
@@ -1077,7 +1089,7 @@ mod tests {
 
         // The measurement is the widest line, and a hard break adds a line's height.
         let mut one = style("Text", 72.0);
-        let mut two = style("Text\nText", 72.0);
+        let two = style("Text\nText", 72.0);
         let measured = text_box_size(&one).width;
         assert_eq!(text_box_size(&two).width, measured);
         assert!(text_box_size(&two).height > text_box_size(&one).height);
@@ -1151,7 +1163,7 @@ mod tests {
         let advance = left.lines[0].advance;
         assert_eq!(left.lines[0].origin_x, left.padding);
         assert_eq!(left.lines[0].glyphs[0].x, left.padding);
-        assert_eq!(left.caret_rect(left.content_units()).x, left.padding + advance);
+        assert_eq!(left.caret_rect(left.content_units()).min_x(), left.padding + advance);
 
         style.alignment = TextAlignment::Center;
         let center = TextLayout::layout(&style);
@@ -1161,7 +1173,7 @@ mod tests {
         style.alignment = TextAlignment::Right;
         let right = TextLayout::layout(&style);
         assert_eq!(right.lines[0].origin_x - right.padding, limit - advance);
-        assert_eq!(right.caret_rect(right.content_units()).x, right.padding + limit);
+        assert_eq!(right.caret_rect(right.content_units()).min_x(), right.padding + limit);
         assert_eq!(right.lines[0].glyphs[0].x, right.lines[0].origin_x);
     }
 
@@ -1285,9 +1297,9 @@ mod tests {
             layout.line_rects(),
             vec![Rect::new(layout.padding, top, layout.container.width, layout.line_height)]
         );
-        assert_eq!(layout.caret_rect(0).x, line.origin_x);
-        assert!(close(layout.caret_rect(1).x, line.origin_x + a));
-        assert!(close(layout.caret_rect(2).x, line.origin_x + a + b));
+        assert_eq!(layout.caret_rect(0).min_x(), line.origin_x);
+        assert!(close(layout.caret_rect(1).min_x(), line.origin_x + a));
+        assert!(close(layout.caret_rect(2).min_x(), line.origin_x + a + b));
         assert_eq!(layout.caret_rect(2).height(), layout.line_height);
         assert_eq!(layout.caret_rect(2).min_y(), top);
         // Offsets outside the content clamp to its ends.
@@ -1341,11 +1353,11 @@ mod tests {
         assert_eq!(tracked.lines[0].glyphs.len(), 5);
         // Tracking follows every glyph, the last one included, as `.kern` does.
         assert!(close(tracked.lines[0].advance - plain.lines[0].advance, 50.0));
-        assert!(close(tracked.caret_rect(5).x - plain.caret_rect(5).x, 50.0));
-        for (tracked, plain) in tracked.lines[0].glyphs.iter().zip(&plain.lines[0].glyphs) {
-            assert_eq!(tracked.x - plain.x, tracked.x - plain.x);
-        }
+        assert!(close(tracked.caret_rect(5).min_x() - plain.caret_rect(5).min_x(), 50.0));
         assert_eq!(tracked.lines[0].glyphs[0].x, plain.lines[0].glyphs[0].x);
+        for (index, tracked) in tracked.lines[0].glyphs.iter().enumerate() {
+            assert!(close(tracked.x - plain.lines[0].glyphs[index].x, 10.0 * index as f64));
+        }
     }
 
     #[test]
@@ -1355,7 +1367,7 @@ mod tests {
         assert_eq!(layout.lines[0].glyphs[0].character, '\t');
         assert_eq!(layout.lines[0].glyphs[0].advance, TAB_INTERVAL);
         assert_eq!(layout.lines[0].glyphs[1].x, layout.padding + TAB_INTERVAL);
-        assert_eq!(layout.caret_rect(1).x, layout.padding + TAB_INTERVAL);
+        assert_eq!(layout.caret_rect(1).min_x(), layout.padding + TAB_INTERVAL);
 
         // A tab after text reaches the next stop, counted from the container's left edge.
         let mut after = style.clone();
@@ -1444,7 +1456,7 @@ mod tests {
         assert_eq!(layout.lines[0].range, TextRange::new(0, 0));
         assert_eq!(layout.lines[0].span_end, 0);
         assert_eq!(layout.lines[0].advance, 0.0);
-        assert_eq!(layout.caret_rect(0).x, layout.padding);
+        assert_eq!(layout.caret_rect(0).min_x(), layout.padding);
         assert_eq!(layout.offset_for_point(Point::new(150.0, 60.0)), 0);
         assert!(layout.selection_rects(TextRange::new(0, 0)).is_empty());
 
@@ -1454,7 +1466,7 @@ mod tests {
         assert_eq!(layout.lines.len(), 2);
         assert!(layout.lines[1].glyphs.is_empty());
         assert_eq!(layout.lines[1].range, TextRange::new(2, 0));
-        assert_eq!(layout.caret_rect(2).x, layout.padding);
+        assert_eq!(layout.caret_rect(2).min_x(), layout.padding);
         assert_eq!(layout.caret_rect(2).min_y(), layout.padding + layout.line_height);
     }
 
@@ -1484,7 +1496,7 @@ mod tests {
         assert_eq!(layout.content_units(), 2);
         assert_eq!(layout.lines[0].glyphs.len(), 1);
         assert_eq!(layout.lines[0].glyphs[0].utf16_length, 2);
-        assert_eq!(layout.caret_rect(2).x - layout.caret_rect(0).x, layout.lines[0].advance);
+        assert_eq!(layout.caret_rect(2).min_x() - layout.caret_rect(0).min_x(), layout.lines[0].advance);
     }
 
     #[test]
@@ -1507,6 +1519,59 @@ mod tests {
         assert!(rects[1].max_x() < layout.lines[1].origin_x + layout.lines[1].advance - 1.0);
         // The covered letters are the ones the range names.
         assert!(rects[0].width() > 0.0 && rects[1].width() > 0.0);
+
+        // A range that covers only the break has no width and fills nothing.
+        assert!(layout.selection_rects(TextRange::new(4, 1)).is_empty());
+
+        // A click lands on the line it is over.
+        let second = layout.padding + layout.line_height;
+        assert_eq!(layout.offset_for_point(Point::new(layout.lines[1].origin_x - 5.0, second + 2.0)), 5);
+        assert_eq!(
+            layout.offset_for_point(Point::new(10_000.0, second + 2.0)),
+            9
+        );
+        assert_eq!(layout.offset_for_point(Point::new(10_000.0, 0.0)), 4);
+    }
+
+    #[test]
+    fn a_non_breaking_space_never_breaks_the_line() {
+        if !fonts_available() {
+            return;
+        }
+        // A container just wide enough for "aaaa " and no more.
+        let probe = TextLayout::layout(&style("aaaa bbbb", 24.0));
+        let glyphs = &probe.lines[0].glyphs;
+        let words: f64 = glyphs[0..4].iter().map(|glyph| glyph.advance).sum();
+        let space = glyphs[4].advance;
+        let container = words + space + 0.5;
+        let box_width = (container + 24.0).ceil();
+        let assert_break = |content: &str, keeps_space: bool| {
+            let layout = TextLayout::layout(&boxed(content, 24.0, box_width, 300.0));
+            assert_eq!(layout.lines.len(), 2, "{content:?} wraps");
+            let first: Vec<char> = layout.lines[0].glyphs.iter().map(|glyph| glyph.character).collect();
+            assert_eq!(
+                first.contains(&'\u{00A0}'),
+                keeps_space,
+                "{content:?} first line {first:?}"
+            );
+        };
+        assert_break("aaaa\u{00A0}bbbb", true);
+        assert_break("aaaa bbbb", false);
+    }
+
+    #[test]
+    fn the_same_style_lays_out_the_same_way() {
+        let style = boxed("Determinism 123\nsecond line", 20.0, 200.0, 300.0);
+        let first = TextLayout::layout(&style);
+        let second = TextLayout::layout(&style);
+        assert_eq!(first.lines, second.lines);
+        assert_eq!(first.size, second.size);
+        if fonts_available() {
+            assert_eq!(
+                text_image(&style).expect("a valid style rasterizes"),
+                text_image(&style).expect("a valid style rasterizes")
+            );
+        }
     }
 
     #[test]
@@ -1529,9 +1594,23 @@ mod tests {
             .collect();
         assert!(!ink_x.is_empty() && !ink_y.is_empty());
         let first_x = *ink_x.first().expect("ink") as f64;
+        let last_x = *ink_x.last().expect("ink") as f64;
+        let first_y = *ink_y.first().expect("ink") as f64;
         let last_y = *ink_y.last().expect("ink") as f64;
-        assert!(first_x >= layout.padding + glyph.x - 1.0, "the ink starts inside the box");
+        // The glyph's ink sits inside its own advance box, which the layout put inside the box.
+        assert!(glyph.x >= layout.padding, "the glyph starts inside the padding");
+        assert!(
+            first_x >= glyph.x - 1.0 && first_x < glyph.x + glyph.advance,
+            "the ink starts inside the glyph's box: {first_x} vs {}",
+            glyph.x
+        );
+        assert!(last_x < glyph.x + glyph.advance + 1.0, "the ink ends inside the glyph's box");
+        // A capital sits on the line, above the baseline, and is as tall as the font size at most.
+        assert!(first_y >= layout.lines[0].rect.min_y(), "the ink is inside the line");
         assert!(last_y < layout.lines[0].baseline, "a capital has no descender below the baseline");
-        assert!(last_y >= layout.lines[0].baseline - layout.font_size as f64, "the ink is on the line");
+        assert!(
+            last_y >= layout.lines[0].baseline - layout.font_size as f64,
+            "the ink is on the line"
+        );
     }
 }
