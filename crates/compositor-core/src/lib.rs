@@ -25,6 +25,7 @@ pub mod layer_transform;
 pub mod limits;
 pub mod palette;
 pub mod path;
+pub mod path_ops;
 pub mod raster;
 pub mod selection;
 pub mod settings;
