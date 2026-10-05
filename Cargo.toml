@@ -23,6 +23,8 @@ compositor-pixels = { path = "crates/compositor-pixels" }
 compositor-render = { path = "crates/compositor-render" }
 compositor-session = { path = "crates/compositor-session" }
 compositor-io = { path = "crates/compositor-io" }
+compositor-ui = { path = "crates/compositor-ui" }
+compositor-app = { path = "crates/compositor-app" }
 
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +50,7 @@ usvg = "0.48"
 rawler = "0.8"
 tiny-skia = "0.12"
 sha2 = "0.10"
+clipper2 = "0.6"
 
 [profile.dev]
 opt-level = 1

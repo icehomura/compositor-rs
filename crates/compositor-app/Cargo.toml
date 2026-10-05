@@ -1,5 +1,6 @@
 [package]
 name = "compositor-app"
+description = "The Compositor application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 compositor-core.workspace = true
+compositor-pixels.workspace = true
+compositor-render.workspace = true
+compositor-session.workspace = true
+compositor-io.workspace = true
+compositor-ui.workspace = true
+gpui-kit = "0.7"
+log.workspace = true
+env_logger.workspace = true
