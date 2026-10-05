@@ -9,10 +9,24 @@ use serde::{Deserialize, Serialize};
 /// `CGFloat` on a 64-bit platform.
 pub type CGFloat = f64;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// A point. JSON is `[x, y]`, exactly the array form Swift's `Codable` `CGPoint` conformance writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: CGFloat,
     pub y: CGFloat,
+}
+
+impl Serialize for Point {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&[self.x, self.y], serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Point {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let [x, y] = <[CGFloat; 2]>::deserialize(deserializer)?;
+        Ok(Point { x, y })
+    }
 }
 
 impl Point {
@@ -52,10 +66,24 @@ impl std::ops::Mul<CGFloat> for Point {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// A size. JSON is `[width, height]`, the array form Swift's `Codable` `CGSize` conformance writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Size {
     pub width: CGFloat,
     pub height: CGFloat,
+}
+
+impl Serialize for Size {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&[self.width, self.height], serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Size {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let [width, height] = <[CGFloat; 2]>::deserialize(deserializer)?;
+        Ok(Size { width, height })
+    }
 }
 
 impl Size {
@@ -76,11 +104,24 @@ impl Size {
 }
 
 /// `CGRect` equivalent. A *null* rectangle is represented the way CoreGraphics does, with an infinite
-/// origin, so `is_null`, `intersection` and `union` behave identically.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// origin, so `is_null`, `intersection` and `union` behave identically. JSON is `[[x, y], [w, h]]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub origin: Point,
     pub size: Size,
+}
+
+impl Serialize for Rect {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&(self.origin, self.size), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Rect {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (origin, size) = <(Point, Size)>::deserialize(deserializer)?;
+        Ok(Rect { origin, size })
+    }
 }
 
 impl Default for Rect {
