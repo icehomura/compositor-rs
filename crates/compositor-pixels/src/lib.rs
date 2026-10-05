@@ -6,16 +6,28 @@
 //! this crate can be diffed against the original `*.c` line for line.
 
 pub mod adjust_pixels;
+pub mod adjustments;
 pub mod blend;
+pub mod brush;
 pub mod brush_pixels;
+pub mod camera_raw;
+pub mod canvas;
 pub mod content_fill;
 pub mod dither_pixels;
+pub mod effects;
+pub mod filters;
+pub mod gradient;
 pub mod heal_pixels;
 pub mod lens_pixels;
 pub mod levels_pixels;
+pub mod masks;
 pub mod noise_pixels;
 pub mod raster;
+pub mod resample;
+pub mod text;
+pub mod trim;
 pub mod wand_pixels;
+pub mod warp;
 
 /// `rgba_clamp_premultiplied`: after resampling with a filter that rings (Lanczos), premultiplied colors
 /// can exceed their alpha; this clamps each channel back to its pixel's alpha.
