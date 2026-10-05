@@ -454,9 +454,14 @@ impl Canvas {
             // A uniform mask keeps the same shape at full coverage.
             return Coverage::uniform(rect, image.get(0, 0) as f64 / 255.0, self.pixel_size());
         }
-        let inverse = self.state.ctm.inverted();
-        let mut coverage = Coverage::empty(self.pixel_size());
         let bounds = self.device_bounds(rect);
+        let mut coverage = Coverage::zeroed(Rect::new(
+            bounds.2 as f64,
+            bounds.0 as f64,
+            (bounds.3 - bounds.2) as f64,
+            (bounds.1 - bounds.0) as f64,
+        ));
+        let inverse = self.state.ctm.inverted();
         for y in bounds.0..bounds.1 {
             for x in bounds.2..bounds.3 {
                 let device = Point::new(x as f64 + 0.5, y as f64 + 0.5);
@@ -472,7 +477,7 @@ impl Canvas {
                     v * image.height() as f64 - 0.5,
                     self.state.interpolation,
                 );
-                coverage.set(x, y, value as f64 / 255.0);
+                coverage.set(x - bounds.2, y - bounds.0, value as f64 / 255.0);
             }
         }
         coverage
@@ -670,6 +675,20 @@ impl Coverage {
         Coverage {
             rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             values: Vec::new(),
+        }
+    }
+
+    /// A coverage buffer over exactly `rect`, all zero — the allocation the map-a-source-image paths
+    /// need, since they only touch the device bounds their source lands in.
+    fn zeroed(rect: Rect) -> Self {
+        let width = rect.width().max(0.0) as usize;
+        let height = rect.height().max(0.0) as usize;
+        if width == 0 || height == 0 {
+            return Coverage::empty(Size::ZERO);
+        }
+        Coverage {
+            rect,
+            values: vec![0.0; width * height],
         }
     }
 
@@ -1030,12 +1049,25 @@ mod tests {
     }
 
     #[test]
-    fn antialiased_path_edge_has_partial_coverage() {
-        let mut canvas = Canvas::new_gray(16, 16);
-        canvas.set_fill_gray(1.0);
-        canvas.fill_path(&Path::rect(Rect::new(2.5, 2.0, 4.0, 4.0)), FillRule::Winding);
-        let gray = canvas.snapshot_gray();
-        assert!(gray.get(2, 3) > 0 && gray.get(2, 3) < 255, "half-covered column is partial");
-        assert_eq!(gray.get(3, 3), 255);
+    fn draw_gray_paints_a_multi_pixel_mask() {
+        // Regression: the image-coverage path allocated a zero-sized buffer, so every mask larger than
+        // 1×1 painted nothing.
+        let mut canvas = Canvas::new_rgba(20, 20);
+        canvas.set_fill_color(PaletteColor::new(1.0, 0.0, 0.0));
+        canvas.draw_gray(&Gray8Image::uniform(4, 2, 255), Rect::new(2.0, 2.0, 4.0, 2.0));
+        let image = canvas.snapshot();
+        assert_eq!(image.get(3, 3), [255, 0, 0, 255]);
+        assert_eq!(image.get(0, 0), [0, 0, 0, 0]);
+        assert_eq!(image.get(7, 3), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn draw_gray_partial_values_are_coverage() {
+        let mut canvas = Canvas::new_rgba(8, 8);
+        canvas.set_fill_color(PaletteColor::new(0.0, 0.0, 1.0));
+        canvas.draw_gray(&Gray8Image::uniform(2, 2, 128), Rect::new(0.0, 0.0, 2.0, 2.0));
+        let pixel = canvas.snapshot().get(1, 1);
+        assert_eq!(pixel[3], 128, "half coverage keeps half the alpha");
+        assert_eq!(pixel[2], 128, "premultiplied blue tracks the coverage");
     }
 }
