@@ -153,6 +153,11 @@ impl Canvas {
         Size::new(self.width() as f64, self.height() as f64)
     }
 
+    /// `CGContext.boundingBoxOfClipPath`: the device-space bounding box of the current clip.
+    pub fn clip_bounds(&self) -> Rect {
+        self.state.clip.rect
+    }
+
     pub fn save(&mut self) {
         self.stack.push(self.state.clone());
     }

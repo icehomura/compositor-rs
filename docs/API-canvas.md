@@ -58,8 +58,9 @@ impl Canvas {
 
     pub fn set_fill_color(&mut self, color: PaletteColor);
     pub fn set_fill_gray(&mut self, value: f64);
-    pub fn set_fill_alpha(&mut self, alpha: f64);
     pub fn set_alpha(&mut self, alpha: f64);
+    /// `CGContext.boundingBoxOfClipPath`: the device-space bounding box of the current clip.
+    pub fn clip_bounds(&self) -> Rect;
     pub fn set_blend_mode(&mut self, mode: LayerBlendMode);
     pub fn set_should_antialias(&mut self, value: bool);
     pub fn set_interpolation_quality(&mut self, quality: InterpolationQuality);

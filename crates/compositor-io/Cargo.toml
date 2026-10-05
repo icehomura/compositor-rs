@@ -8,3 +8,20 @@ repository.workspace = true
 
 [dependencies]
 compositor-core.workspace = true
+compositor-pixels.workspace = true
+image.workspace = true
+png.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+notify.workspace = true
+resvg.workspace = true
+usvg.workspace = true
+rawler.workspace = true
+thiserror.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+half.workspace = true
+rustc-hash.workspace = true
+sha2.workspace = true

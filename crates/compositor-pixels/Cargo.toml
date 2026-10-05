@@ -12,3 +12,6 @@ compositor-core.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 log.workspace = true
+fontdue.workspace = true
+fontdb.workspace = true
+bytemuck.workspace = true

@@ -22,7 +22,9 @@ fn is_testing() -> bool {
     *TESTING.read()
 }
 
-fn config_directory() -> PathBuf {
+/// Where Compositor keeps its own files: `%APPDATA%\Compositor` on Windows, `~/.config/compositor`
+/// elsewhere, or `$COMPOSITOR_CONFIG_DIR` when set.
+pub fn config_directory() -> PathBuf {
     if let Ok(path) = std::env::var("COMPOSITOR_CONFIG_DIR") {
         return PathBuf::from(path);
     }

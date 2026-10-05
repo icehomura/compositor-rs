@@ -8,3 +8,8 @@ repository.workspace = true
 
 [dependencies]
 compositor-core.workspace = true
+compositor-pixels.workspace = true
+rayon.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+rustc-hash.workspace = true
