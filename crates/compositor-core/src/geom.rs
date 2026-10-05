@@ -512,7 +512,9 @@ mod tests {
 
     #[test]
     fn integral_grows_to_whole_pixels() {
+        // CGRectIntegral: floor the origin, ceil the max — ceil(-0.5) = -0 and ceil(1.5) = 2, so the
+        // height is 3, not 4.
         let r = Rect::new(1.2, -0.5, 3.0, 2.0).integral();
-        assert_eq!(r, Rect::new(1.0, -1.0, 4.0, 4.0));
+        assert_eq!(r, Rect::new(1.0, -1.0, 4.0, 3.0));
     }
 }

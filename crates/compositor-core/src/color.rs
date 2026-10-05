@@ -173,9 +173,11 @@ mod tests {
 
     #[test]
     fn hex_round_trips_and_accepts_shorthand() {
-        assert_eq!(PaletteColor::from_hex("FF8000"), PaletteColor::from_hex("#F80").map(|c| c.quantized()));
+        // `F80` doubles each nibble, so it is FF8800 — not FF8000.
+        assert_eq!(PaletteColor::from_hex("#F80"), PaletteColor::from_hex("FF8800"));
         assert_eq!(PaletteColor::new(1.0, 0.5, 0.0).hex(), "FF8000");
         assert_eq!(PaletteColor::from_hex("#GGGGGG"), None);
+        assert_eq!(PaletteColor::from_hex("ffffff"), Some(PaletteColor::WHITE));
     }
 
     #[test]
