@@ -13,6 +13,7 @@ pub mod geom;
 pub mod groups;
 pub mod guides;
 pub mod history;
+pub mod image_ops;
 pub mod imported_image;
 pub mod layer_adjustment;
 pub mod layer_appearance;
