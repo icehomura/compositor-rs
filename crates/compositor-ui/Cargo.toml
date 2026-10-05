@@ -17,3 +17,6 @@ gpui-kit = "0.7"
 rustc-hash.workspace = true
 parking_lot.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+gpui-kit = { version = "0.7", features = ["test-support"] }
