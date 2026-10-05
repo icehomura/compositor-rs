@@ -145,7 +145,7 @@ impl Rgba8Image {
 
     /// Copies `source` into this image at `origin`, clipped to the receiver.
     pub fn draw_over(&mut self, source: &Rgba8Image, origin: Cell) {
-        let (ox, oy) = (origin[0], origin[1]);
+        let (ox, oy) = (origin[0] as i64, origin[1] as i64);
         for y in 0..source.height as i64 {
             let dy = oy + y;
             if dy < 0 || dy >= self.height as i64 {
