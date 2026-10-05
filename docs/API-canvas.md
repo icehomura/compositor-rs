@@ -68,6 +68,8 @@ impl Canvas {
     pub fn fill_path(&mut self, path: &Path, rule: FillRule);
     pub fn fill_rect(&mut self, rect: Rect);
     pub fn fill_rects(&mut self, rects: &[Rect]);
+    /// `CGContext.clear(_:)`: erases `rect` back to transparent (black on a mask target), clipped.
+    pub fn clear(&mut self, rect: Rect);
     pub fn fill_gradient(&mut self, rect: Rect, gradient: &GradientPaint);
 
     /// Draws an image into `rect` in user space, scaled, with the current interpolation quality and
@@ -111,8 +113,9 @@ impl Raster {
     /// components, exactly as the Swift does.
     pub fn pixel_to_document(transform: &LayerTransform, width: f64, height: f64) -> AffineTransform;
 
-    /// Draws `image` into `rect` (document space) of a mask or RGBA canvas.
-    pub fn draw(image: &Rgba8Image, rect: Rect, mask: bool, canvas: &mut Canvas);
+    /// Draws `image` into `rect` (document space) of a mask or RGBA canvas, `.copy` semantics.
+    /// Takes the patch type so gray mask patches and RGBA patches both work.
+    pub fn draw(image: &PatchImage, rect: Rect, mask: bool, canvas: &mut Canvas);
 
     /// Fills `rect` with `coverage` (document alpha) times `alpha`.
     pub fn fill(rect: Rect, coverage: f64, alpha: f64, canvas: &mut Canvas);
