@@ -5,7 +5,17 @@
 //! logic of its own beyond presentation state.
 
 pub mod actions;
+pub mod canvas;
+pub mod content_view;
+pub mod panels;
+pub mod sheets;
 pub mod shortcuts;
 pub mod theme;
+pub mod tool_controls;
 pub mod tool_header;
+pub mod toolbar;
 pub mod widgets;
+pub mod workspace;
+
+pub use content_view::ContentView;
+pub use workspace::ProjectWorkspaceView;
