@@ -13,6 +13,7 @@ use compositor_core::blend::LayerBlendMode;
 use compositor_core::color::to_byte;
 use compositor_core::geom::{AffineTransform, Point, Rect, Size};
 use compositor_core::path::{FillRule, Path, PathElement, Subpath, flatten};
+use compositor_core::path_ops::{LineCap, LineJoin};
 use compositor_core::{Gray8Image, PaletteColor, Rgba8Image};
 
 /// `CGInterpolationQuality`'s three values, the ones the editor uses.
@@ -260,6 +261,20 @@ impl Canvas {
         self.paint_coverage(&coverage);
     }
 
+    /// Strokes `path`: the outline `CGPath.copy(strokingWithWidth:…)` produces, filled.
+    pub fn stroke_path(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        width: f64,
+        cap: LineCap,
+        join: LineJoin,
+        miter_limit: f64,
+    ) {
+        let outline = compositor_core::path_ops::stroking_with_width(path, width, cap, join, miter_limit, None);
+        self.fill_path(&outline, rule);
+    }
+
     pub fn fill_rect(&mut self, rect: Rect) {
         let coverage = self.rect_coverage(rect);
         self.paint_coverage(&coverage);
@@ -268,6 +283,71 @@ impl Canvas {
     pub fn fill_rects(&mut self, rects: &[Rect]) {
         for rect in rects {
             self.fill_rect(*rect);
+        }
+    }
+
+    /// `CGContext.clear(_:)`: erases `rect` (current user space, current clip applied) back to
+    /// transparent — or to black on a mask target. Edges antialias by scaling the existing pixel by
+    /// `1 - coverage`, exactly what clearing through a coverage mask does.
+    pub fn clear(&mut self, rect: Rect) {
+        let coverage = self.rect_coverage(rect);
+        self.erase_with_coverage(&coverage);
+    }
+
+    /// A `.destinationOut` fill of `rect` with the current paint's coverage: the same erase, kept
+    /// separate because callers use it for brush erasing rather than for recompositing.
+    pub fn fill_destination_out(&mut self, rect: Rect) {
+        let coverage = self.rect_coverage(rect);
+        self.erase_with_coverage(&coverage);
+    }
+
+    /// A `.destinationOut` fill of a path.
+    pub fn fill_path_destination_out(&mut self, path: &Path, rule: FillRule) {
+        let coverage = self.path_coverage(path, Some(rule));
+        self.erase_with_coverage(&coverage);
+    }
+
+    fn erase_with_coverage(&mut self, coverage: &Coverage) {
+        let clip = self.state.clip.clone();
+        let alpha = self.state.alpha;
+        let (min_x, max_x) = (coverage.rect.min_x() as i64, coverage.rect.max_x() as i64);
+        let (min_y, max_y) = (coverage.rect.min_y() as i64, coverage.rect.max_y() as i64);
+        let width = self.width();
+        let height = self.height();
+        for y in min_y..max_y {
+            if y < 0 || y >= height as i64 {
+                continue;
+            }
+            for x in min_x..max_x {
+                if x < 0 || x >= width as i64 {
+                    continue;
+                }
+                let value = coverage.at(x, y) * clip.coverage_at(x, y) * alpha;
+                if value <= 0.0 {
+                    continue;
+                }
+                let keep = 1.0 - value;
+                let (x, y) = (x as usize, y as usize);
+                match &mut self.target {
+                    Target::Rgba(image) => {
+                        let pixel = image.get(x, y);
+                        image.set(
+                            x,
+                            y,
+                            [
+                                (pixel[0] as f64 * keep).round() as u8,
+                                (pixel[1] as f64 * keep).round() as u8,
+                                (pixel[2] as f64 * keep).round() as u8,
+                                (pixel[3] as f64 * keep).round() as u8,
+                            ],
+                        );
+                    }
+                    Target::Gray(image) => {
+                        let existing = image.get(x, y) as f64 * keep;
+                        image.set(x, y, existing.round() as u8);
+                    }
+                }
+            }
         }
     }
 
