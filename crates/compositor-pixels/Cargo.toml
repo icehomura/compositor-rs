@@ -1,0 +1,14 @@
+[package]
+name = "compositor-pixels"
+description = "CPU pixel kernels for Compositor (ports of the C kernels and the Swift pixel paths)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compositor-core.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+log.workspace = true
