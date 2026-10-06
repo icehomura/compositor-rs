@@ -1,7 +1,7 @@
-# Frozen API: `compositor_pixels::canvas` and `compositor_pixels::raster`
+# Frozen API: `compositor_rs_pixels::canvas` and `compositor_rs_pixels::raster`
 
 The `CGContext`/`BrushRaster` replacement. Porting slices code against these signatures; do not change them
-without updating every caller. Implementations live in `crates/compositor-pixels/src/canvas.rs` and
+without updating every caller. Implementations live in `crates/compositor-rs-pixels/src/canvas.rs` and
 `raster.rs`.
 
 ## `canvas`
