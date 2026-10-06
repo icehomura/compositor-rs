@@ -8,7 +8,10 @@ use std::collections::HashSet;
 
 use compositor_core::color::PaletteColor;
 use compositor_core::geom::{CGFloat, Point, Size};
-use compositor_core::guides::{CanvasGuide, CanvasGuideAxis, GridAppearance, GridAppearancePreset, GridAppearanceStyle, GuideDrag, LayoutGrid};
+use compositor_core::guides::{
+    CanvasGuide, CanvasGuideAxis, GridAppearance, GridAppearancePreset, GridAppearanceStyle,
+    GuideDrag, LayoutGrid,
+};
 use compositor_core::layer_transform::TransformSnap;
 use compositor_core::settings;
 use compositor_core::Id;
@@ -198,10 +201,12 @@ impl GuideSettings {
     pub fn stored_grid_appearance() -> GridAppearance {
         let default = GridAppearance::default();
         GridAppearance {
-            preset: GridAppearancePreset::from_raw(&settings::string_value("gridColor", "")).unwrap_or(default.preset),
+            preset: GridAppearancePreset::from_raw(&settings::string_value("gridColor", ""))
+                .unwrap_or(default.preset),
             custom_color: PaletteColor::from_hex(&settings::string_value("gridCustomColor", ""))
                 .unwrap_or(default.custom_color),
-            style: GridAppearanceStyle::from_raw(&settings::string_value("gridStyle", "")).unwrap_or(default.style),
+            style: GridAppearanceStyle::from_raw(&settings::string_value("gridStyle", ""))
+                .unwrap_or(default.style),
             opacity: settings::int_value("gridOpacity", default.opacity as i64).max(0) as usize,
         }
     }
@@ -225,10 +230,12 @@ impl CanvasRuler {
     pub fn major_step(points_per_pixel: CGFloat) -> CGFloat {
         let target = 70.0 / points_per_pixel.max(0.0001);
         const NICE: [CGFloat; 18] = [
-            1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1_000.0, 2_000.0, 2_500.0,
-            5_000.0, 10_000.0, 20_000.0, 25_000.0,
+            1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1_000.0, 2_000.0,
+            2_500.0, 5_000.0, 10_000.0, 20_000.0, 25_000.0,
         ];
-        NICE.into_iter().find(|step| *step >= target).unwrap_or(50_000.0)
+        NICE.into_iter()
+            .find(|step| *step >= target)
+            .unwrap_or(50_000.0)
     }
 
     /// A tick's label: the value to whole pixels, "0" at the origin.
@@ -303,7 +310,11 @@ impl EditorSession {
                     .y;
                 (at.y - y).abs()
             };
-            if distance <= tolerance && best.map(|(_, best_distance)| distance < best_distance).unwrap_or(true) {
+            if distance <= tolerance
+                && best
+                    .map(|(_, best_distance)| distance < best_distance)
+                    .unwrap_or(true)
+            {
                 best = Some((guide, distance));
             }
         }
@@ -370,7 +381,9 @@ impl EditorSession {
         if drag.is_new {
             self.begin_edit("New Guide");
             if let Some(document) = self.document.as_mut() {
-                document.guides.push(CanvasGuide::new(drag.id, drag.axis, drag.position));
+                document
+                    .guides
+                    .push(CanvasGuide::new(drag.id, drag.axis, drag.position));
             }
             self.end_edit();
         } else if drag.original != Some(drag.position) {
@@ -415,7 +428,11 @@ impl EditorSession {
     }
 
     /// Alignment lines a move or crop may snap to, according to View > Snap and Snap To.
-    pub fn alignment_snap_targets(&self, excluding: &HashSet<Id>, include_centers: bool) -> (Vec<f64>, Vec<f64>) {
+    pub fn alignment_snap_targets(
+        &self,
+        excluding: &HashSet<Id>,
+        include_centers: bool,
+    ) -> (Vec<f64>, Vec<f64>) {
         if !self.snap_enabled {
             return (Vec::new(), Vec::new());
         }
@@ -449,12 +466,24 @@ impl EditorSession {
                     min_y = min_y.min(corner.y);
                     max_y = max_y.max(corner.y);
                 }
-                if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+                if !(min_x.is_finite()
+                    && max_x.is_finite()
+                    && min_y.is_finite()
+                    && max_y.is_finite())
+                {
                     continue;
                 }
                 if include_centers {
-                    xs.extend([min_x.round(), ((min_x + max_x) / 2.0).round(), max_x.round()]);
-                    ys.extend([min_y.round(), ((min_y + max_y) / 2.0).round(), max_y.round()]);
+                    xs.extend([
+                        min_x.round(),
+                        ((min_x + max_x) / 2.0).round(),
+                        max_x.round(),
+                    ]);
+                    ys.extend([
+                        min_y.round(),
+                        ((min_y + max_y) / 2.0).round(),
+                        max_y.round(),
+                    ]);
                 } else {
                     xs.extend([min_x.round(), max_x.round()]);
                     ys.extend([min_y.round(), max_y.round()]);
@@ -523,7 +552,11 @@ impl EditorSession {
                 let mut min = f64::INFINITY;
                 let mut max = f64::NEG_INFINITY;
                 for corner in corners {
-                    let value = if axis == CanvasGuideAxis::Vertical { corner.x } else { corner.y };
+                    let value = if axis == CanvasGuideAxis::Vertical {
+                        corner.x
+                    } else {
+                        corner.y
+                    };
                     min = min.min(value);
                     max = max.max(value);
                 }
@@ -567,7 +600,11 @@ impl EditorSession {
 
     /// The layout grid as the overlay draws it: `(spacing, subdivisions, step)`.
     pub fn layout_grid_description(&self) -> (usize, usize, CGFloat) {
-        (self.layout_grid.spacing(), self.layout_grid.subdivisions(), self.layout_grid.step())
+        (
+            self.layout_grid.spacing(),
+            self.layout_grid.subdivisions(),
+            self.layout_grid.step(),
+        )
     }
 
     /// The grid's lines along a document edge, majors and subdivisions, in whole pixels.
@@ -601,7 +638,11 @@ impl EditorSession {
     /// The size a new document is suggested from a clipboard image (`NewCanvasSheet`): the decoded
     /// pixel size, with a rotated EXIF orientation (5…8) swapped, and only when both sides are
     /// valid document dimensions. `None` when it isn't a usable image.
-    pub fn clipboard_canvas_size(width: i64, height: i64, orientation: Option<i64>) -> Option<(usize, usize)> {
+    pub fn clipboard_canvas_size(
+        width: i64,
+        height: i64,
+        orientation: Option<i64>,
+    ) -> Option<(usize, usize)> {
         let (mut width, mut height) = (width, height);
         if let Some(orientation) = orientation {
             if (5..=8).contains(&orientation) {
@@ -674,16 +715,27 @@ mod tests {
 
     #[test]
     fn clipboard_size_swaps_rotated_orientations_and_validates() {
-        assert_eq!(EditorSession::clipboard_canvas_size(1920, 1080, None), Some((1920, 1080)));
-        assert_eq!(EditorSession::clipboard_canvas_size(1920, 1080, Some(6)), Some((1080, 1920)));
-        assert_eq!(EditorSession::clipboard_canvas_size(1920, 1080, Some(1)), Some((1920, 1080)));
+        assert_eq!(
+            EditorSession::clipboard_canvas_size(1920, 1080, None),
+            Some((1920, 1080))
+        );
+        assert_eq!(
+            EditorSession::clipboard_canvas_size(1920, 1080, Some(6)),
+            Some((1080, 1920))
+        );
+        assert_eq!(
+            EditorSession::clipboard_canvas_size(1920, 1080, Some(1)),
+            Some((1920, 1080))
+        );
         assert_eq!(EditorSession::clipboard_canvas_size(0, 1080, None), None);
         assert_eq!(EditorSession::clipboard_canvas_size(40_000, 10, None), None);
     }
 
     fn session_with_document(width: usize, height: usize) -> EditorSession {
         let mut session = EditorSession::default();
-        session.document = Some(compositor_core::document::CanvasDocument::new(width, height));
+        session.document = Some(compositor_core::document::CanvasDocument::new(
+            width, height,
+        ));
         session
     }
 
@@ -743,7 +795,11 @@ mod tests {
         let history_before = session.history.undo_count();
         session.begin_guide_move(guide);
         session.finish_guide_drag(false);
-        assert_eq!(session.history.undo_count(), history_before, "no move, no edit");
+        assert_eq!(
+            session.history.undo_count(),
+            history_before,
+            "no move, no edit"
+        );
         session.begin_guide_move(guide);
         session.move_guide_drag(55.0);
         session.finish_guide_drag(false);
@@ -763,9 +819,11 @@ mod tests {
         session.add_guide(CanvasGuide::at(CanvasGuideAxis::Vertical, 10.0));
         session.locks_guides = true;
         session.clear_guides();
-        assert_eq!(session.document.as_ref().unwrap().guides.len(), 1);
+        // Clear Guides still works while locked (`GuideTests.swift: lockPreventsCreatingAndMoving`,
+        // line 47-48: `canClearGuides` checks only for guides, not the lock).
+        assert!(session.document.as_ref().unwrap().guides.is_empty());
         session.add_guide(CanvasGuide::at(CanvasGuideAxis::Vertical, 20.0));
-        assert_eq!(session.document.as_ref().unwrap().guides.len(), 1);
+        assert!(session.document.as_ref().unwrap().guides.is_empty());
         session.begin_guide_creation(CanvasGuideAxis::Vertical, 30.0);
         assert_eq!(session.guide_drag, None);
         session.locks_guides = false;
@@ -777,24 +835,39 @@ mod tests {
     #[test]
     fn hit_testing_uses_the_view_space_distance() {
         let mut session = session_with_document(1000, 800);
-        session.viewport.resize(Size::new(1000.0, 800.0), 1.0, Some(Size::new(1000.0, 800.0)));
-        session.viewport.set_zoom(1.0, Point::ZERO, Size::new(1000.0, 800.0));
+        session.viewport.resize(
+            Size::new(1000.0, 800.0),
+            1.0,
+            Some(Size::new(1000.0, 800.0)),
+        );
+        session
+            .viewport
+            .set_zoom(1.0, Point::ZERO, Size::new(1000.0, 800.0));
         session.add_guide(CanvasGuide::at(CanvasGuideAxis::Vertical, 300.0));
         let x = session
             .viewport
             .view_point(Point::new(300.0, 0.0), Size::new(1000.0, 800.0))
             .x;
-        assert!(session.hit_guide(Point::new(x + 4.0, 100.0), GUIDE_HIT_DISTANCE).is_some());
-        assert!(session.hit_guide(Point::new(x + 9.0, 100.0), GUIDE_HIT_DISTANCE).is_none());
+        assert!(session
+            .hit_guide(Point::new(x + 4.0, 100.0), GUIDE_HIT_DISTANCE)
+            .is_some());
+        assert!(session
+            .hit_guide(Point::new(x + 9.0, 100.0), GUIDE_HIT_DISTANCE)
+            .is_none());
         session.shows_guides = false;
-        assert!(session.hit_guide(Point::new(x, 100.0), GUIDE_HIT_DISTANCE).is_none());
+        assert!(session
+            .hit_guide(Point::new(x, 100.0), GUIDE_HIT_DISTANCE)
+            .is_none());
     }
 
     #[test]
     fn alignment_targets_follow_the_snap_to_switches() {
         let mut session = session_with_document(100, 80);
         session.snap_enabled = false;
-        assert_eq!(session.alignment_snap_targets(&HashSet::new(), true), (Vec::new(), Vec::new()));
+        assert_eq!(
+            session.alignment_snap_targets(&HashSet::new(), true),
+            (Vec::new(), Vec::new())
+        );
 
         session.snap_enabled = true;
         session.snap_to_document_bounds = true;
@@ -808,23 +881,37 @@ mod tests {
         assert_eq!(xs, vec![0.0, 100.0]);
         assert_eq!(ys, vec![0.0, 80.0]);
 
-        // Hidden guides do not snap; shown ones do.
+        // Hidden guides do not snap; shown ones do. `addGuide` shows the guides itself, as in
+        // upstream (`Guides.swift: addGuide`), so the switch flips off after the add
+        // (`GuideTests.swift: snapTargetsFollowViewMenu`, lines 123-126).
         session.snap_to_document_bounds = false;
         session.snap_to_guides = true;
-        session.shows_guides = false;
         session.add_guide(CanvasGuide::at(CanvasGuideAxis::Vertical, 12.0));
-        assert_eq!(session.alignment_snap_targets(&HashSet::new(), false).0, Vec::<f64>::new());
+        session.shows_guides = false;
+        assert_eq!(
+            session.alignment_snap_targets(&HashSet::new(), false).0,
+            Vec::<f64>::new()
+        );
         session.shows_guides = true;
-        assert_eq!(session.alignment_snap_targets(&HashSet::new(), false).0, vec![12.0]);
+        assert_eq!(
+            session.alignment_snap_targets(&HashSet::new(), false).0,
+            vec![12.0]
+        );
 
         // The grid's lines appear only while it is shown.
         session.snap_to_guides = false;
         session.snap_to_grid = true;
         session.shows_grid = false;
-        assert!(session.alignment_snap_targets(&HashSet::new(), false).0.is_empty());
+        assert!(session
+            .alignment_snap_targets(&HashSet::new(), false)
+            .0
+            .is_empty());
         session.shows_grid = true;
         session.layout_grid = LayoutGrid::new(50, 1);
-        assert_eq!(session.alignment_snap_targets(&HashSet::new(), false).0, vec![0.0, 50.0, 100.0]);
+        assert_eq!(
+            session.alignment_snap_targets(&HashSet::new(), false).0,
+            vec![0.0, 50.0, 100.0]
+        );
     }
 
     #[test]
@@ -837,9 +924,18 @@ mod tests {
         session.snap_to_grid = false;
         session.snap_to_layers = false;
         // 10 screen points at 1 point per pixel: 40 is pulled to the 40 center target only when close.
-        assert_eq!(session.snapped_guide_position(38.0, CanvasGuideAxis::Vertical, None), 38.0);
-        assert_eq!(session.snapped_guide_position(42.0, CanvasGuideAxis::Vertical, None), 50.0);
-        assert_eq!(session.snapped_guide_position(2.0, CanvasGuideAxis::Horizontal, None), 0.0);
+        assert_eq!(
+            session.snapped_guide_position(38.0, CanvasGuideAxis::Vertical, None),
+            38.0
+        );
+        assert_eq!(
+            session.snapped_guide_position(42.0, CanvasGuideAxis::Vertical, None),
+            50.0
+        );
+        assert_eq!(
+            session.snapped_guide_position(2.0, CanvasGuideAxis::Horizontal, None),
+            0.0
+        );
         // The guide being dragged is not a target for itself.
         let guide = CanvasGuide::at(CanvasGuideAxis::Vertical, 40.0);
         session.add_guide(guide);
@@ -849,7 +945,10 @@ mod tests {
             session.snapped_guide_position(42.0, CanvasGuideAxis::Vertical, Some(guide.id)),
             50.0
         );
-        assert_eq!(session.snapped_guide_position(42.0, CanvasGuideAxis::Vertical, None), 40.0);
+        assert_eq!(
+            session.snapped_guide_position(42.0, CanvasGuideAxis::Vertical, None),
+            40.0
+        );
     }
 
     #[test]
