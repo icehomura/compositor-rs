@@ -18,8 +18,10 @@
 
 use std::sync::{LazyLock, Mutex};
 
-use compositor_core::geom::{CGFloat, Point, Rect};
-use compositor_core::layer_effects::LayerEffects;
+use compositor_core::geom::{CGFloat, Point, Rect, Size};
+use compositor_core::layer_effects::{
+    InnerGlowEffect, InnerShadowEffect, LayerEffects, OuterGlowEffect, StrokeEffect,
+};
 use compositor_core::layer_transform::LayerTransform;
 use compositor_core::limits::MAX_SURFACE_PIXELS;
 use compositor_core::{CoreError, Gray8Image, Rgba8Image, Result};
@@ -134,11 +136,6 @@ fn invalid_effects() -> CoreError {
     CoreError::Message(
         "This is not a valid Compositor project, or its metadata is damaged.".to_string(),
     )
-}
-
-/// `ExportError.render`'s message.
-fn render_failed() -> CoreError {
-    CoreError::Message("The canvas could not be rendered. Try a smaller canvas.".to_string())
 }
 
 /// The layer's pixels with its mask applied, or the pixels as they are when it has none.
@@ -303,14 +300,18 @@ fn shift(source: &[f32], width: usize, height: usize, dx: f32, dy: f32) -> Vec<f
     result
 }
 
+/// The Gaussian weights of one pass: `radius` taps either side of the center.
+fn blur_weights(sigma: f32, radius: i32) -> Vec<f32> {
+    let denominator = 2.0 * sigma * sigma;
+    (-radius..=radius)
+        .map(|offset| (-(offset * offset) as f32 / denominator).exp())
+        .collect()
+}
+
 /// One separable Gaussian pass over the rows, `effects_blur_rows`: weights normalized by their own
 /// sum, sampling clamped to the edge.
 fn blur_rows(source: &[f32], width: usize, height: usize, sigma: f32, radius: i32) -> Vec<f32> {
-    let mut weights = Vec::with_capacity((radius * 2 + 1) as usize);
-    let denominator = 2.0 * sigma * sigma;
-    for offset in -radius..=radius {
-        weights.push((-(offset * offset) as f32 / denominator).exp());
-    }
+    let weights = blur_weights(sigma, radius);
     let weight_sum: f32 = weights.iter().sum();
     let mut result = vec![0.0f32; width * height];
     result
@@ -332,11 +333,7 @@ fn blur_rows(source: &[f32], width: usize, height: usize, sigma: f32, radius: i3
 
 /// The same over the columns, `effects_blur_columns`.
 fn blur_columns(source: &[f32], width: usize, height: usize, sigma: f32, radius: i32) -> Vec<f32> {
-    let mut weights = Vec::with_capacity((radius * 2 + 1) as usize);
-    let denominator = 2.0 * sigma * sigma;
-    for offset in -radius..=radius {
-        weights.push((-(offset * offset) as f32 / denominator).exp());
-    }
+    let weights = blur_weights(sigma, radius);
     let weight_sum: f32 = weights.iter().sum();
     let mut result = vec![0.0f32; width * height];
     result
@@ -662,29 +659,254 @@ pub fn render_effects(pixels: &Rgba8Image, effects: &LayerEffects) -> Result<Rgb
     ))
 }
 
+
+// MARK: - The pieces a surface draws with
+
+/// The per-piece coverage helpers of `LayerEffectsRenderer`: a shape's alpha, a stroke's ring, a
+/// shadow's silhouette, a glow's light — each as 8-bit gray coverage (255 is fully covered), the
+/// form `Canvas::draw_gray`/`draw_coverage` and `Raster::fill` take. `LayerEffectsSurface` composes
+/// a live surface from these; [`LayerEffectsRenderer::render`] uses the kernels instead.
+impl LayerEffectsRenderer {
+    /// `LayerEffectsRenderer.coverage`: the shape's own alpha, placed in a bigger canvas and
+    /// optionally softened (`CIGaussianBlur` at half the given blur, clamped to the canvas).
+    pub fn coverage(pixels: &Rgba8Image, placed: Rect, size: Size, blur: CGFloat) -> Result<Gray8Image> {
+        let width = size.width as usize;
+        let height = size.height as usize;
+        if width == 0 || height == 0 {
+            return Err(CoreError::TooLarge(compositor_core::limits::max_surface_megapixels()));
+        }
+        let levels = coverage_levels(pixels, placed, width, height);
+        let image = image_from_levels(&levels, width, height);
+        if blur > 0.0 {
+            Ok(crate::filters::gaussian_blur_gray(&image, blur / 2.0, true))
+        } else {
+            Ok(image)
+        }
+    }
+
+    /// `LayerEffectsRenderer.masked`: the layer's pixels with its mask applied, or the pixels as they
+    /// are when it has none.
+    pub fn masked(image: &Rgba8Image, mask: Option<&Gray8Image>) -> Rgba8Image {
+        masked(image, mask)
+    }
+
+    /// `LayerEffectsRenderer.shadowCoverage`: a shadow's coverage for one piece of a layer — its
+    /// shape, moved and softened.
+    pub fn shadow_coverage(
+        pixels: &Rgba8Image,
+        size: Size,
+        offset: Size,
+        blur: CGFloat,
+    ) -> Result<Gray8Image> {
+        let placed = Rect::new(0.0, 0.0, pixels.width() as f64, pixels.height() as f64)
+            .offset_by(offset.width, offset.height);
+        Self::coverage(pixels, placed, size, blur)
+    }
+
+    /// `LayerEffectsRenderer.ringCoverage`: a stroke's ring for one piece of a layer.
+    pub fn ring_coverage(pixels: &Rgba8Image, size: Size, stroke: &StrokeEffect) -> Result<Gray8Image> {
+        Self::stroke_coverage(
+            pixels,
+            Rect::new(0.0, 0.0, pixels.width() as f64, pixels.height() as f64),
+            size,
+            stroke,
+        )
+    }
+
+    /// `LayerEffectsRenderer.strokeCoverage`: where a stroke lands — the shape grown (or shrunk) by
+    /// its size, less the shape itself. A square reach, not a round one: a round one eats into the
+    /// corners of a rectangle, which reads as a wobbly edge.
+    pub fn stroke_coverage(
+        pixels: &Rgba8Image,
+        placed: Rect,
+        size: Size,
+        stroke: &StrokeEffect,
+    ) -> Result<Gray8Image> {
+        let width = size.width as usize;
+        let height = size.height as usize;
+        if width == 0 || height == 0 {
+            return Err(CoreError::TooLarge(compositor_core::limits::max_surface_megapixels()));
+        }
+        let shape = coverage_levels(pixels, placed, width, height);
+        let reach = stroke.size.round().max(1.0) as i32;
+        let moved = Self::extreme(&shape, width, height, reach, stroke.inside);
+        let levels: Vec<f32> = shape
+            .iter()
+            .zip(moved.iter())
+            .map(|(shape, moved)| {
+                let value = if stroke.inside {
+                    shape - moved
+                } else {
+                    moved - shape
+                };
+                value.clamp(0.0, 1.0)
+            })
+            .collect();
+        Ok(image_from_levels(&levels, width, height))
+    }
+
+    /// `LayerEffectsRenderer.innerCoverage`: an inner shadow's coverage — what lies outside the
+    /// layer, moved and softened, kept to the layer's own shape.
+    pub fn inner_coverage(
+        pixels: &Rgba8Image,
+        placed: Rect,
+        size: Size,
+        shadow: &InnerShadowEffect,
+    ) -> Result<Gray8Image> {
+        let width = size.width as usize;
+        let height = size.height as usize;
+        if width == 0 || height == 0 {
+            return Err(CoreError::TooLarge(compositor_core::limits::max_surface_megapixels()));
+        }
+        let shape = coverage_levels(pixels, placed, width, height);
+        let offset = shadow.offset();
+        let moved = Self::coverage(
+            pixels,
+            placed.offset_by(offset.width, offset.height),
+            size,
+            shadow.blur,
+        )?;
+        let outside: Vec<f32> = moved.data().iter().map(|value| *value as f32 / 255.0).collect();
+        let levels = inside_levels(&shape, &outside);
+        Ok(image_from_levels(&levels, width, height))
+    }
+
+    /// `LayerEffectsRenderer.outerGlowCoverage`: the layer's shape softened omnidirectionally, with
+    /// the shape interior excluded.
+    pub fn outer_glow_coverage(
+        pixels: &Rgba8Image,
+        placed: Rect,
+        size: Size,
+        glow: &OuterGlowEffect,
+    ) -> Result<Gray8Image> {
+        let width = size.width as usize;
+        let height = size.height as usize;
+        if width == 0 || height == 0 {
+            return Err(CoreError::TooLarge(compositor_core::limits::max_surface_megapixels()));
+        }
+        let shape = coverage_levels(pixels, placed, width, height);
+        let soft = Self::coverage(pixels, placed, size, glow.size)?;
+        let soft: Vec<f32> = soft.data().iter().map(|value| *value as f32 / 255.0).collect();
+        let levels: Vec<f32> = soft
+            .iter()
+            .zip(shape.iter())
+            .map(|(soft, shape)| (soft * (1.0 - shape)).clamp(0.0, 1.0))
+            .collect();
+        Ok(image_from_levels(&levels, width, height))
+    }
+
+    /// `LayerEffectsRenderer.innerGlowCoverage`: the source shape softened inward, kept to the
+    /// layer's own shape.
+    pub fn inner_glow_coverage(
+        pixels: &Rgba8Image,
+        placed: Rect,
+        size: Size,
+        glow: &InnerGlowEffect,
+    ) -> Result<Gray8Image> {
+        let width = size.width as usize;
+        let height = size.height as usize;
+        if width == 0 || height == 0 {
+            return Err(CoreError::TooLarge(compositor_core::limits::max_surface_megapixels()));
+        }
+        let shape = coverage_levels(pixels, placed, width, height);
+        let blurred = Self::coverage(pixels, placed, size, glow.size)?;
+        let outside: Vec<f32> = blurred.data().iter().map(|value| *value as f32 / 255.0).collect();
+        let levels = inside_levels(&shape, &outside);
+        Ok(image_from_levels(&levels, width, height))
+    }
+
+    /// `LayerEffectsRenderer.extreme`: the largest (or smallest) value within `reach` on each side —
+    /// two sliding-window passes, so the cost doesn't grow with the reach. Past the edge there is
+    /// nothing, so a smallest pass there reads zero.
+    pub fn extreme(source: &[f32], width: usize, height: usize, reach: i32, smallest: bool) -> Vec<f32> {
+        if width == 0 || height == 0 || source.len() != width * height {
+            return Vec::new();
+        }
+        let rows = spread_rows(source, width, height, reach.max(0), smallest);
+        spread_columns(&rows, width, height, reach.max(0), smallest)
+    }
+}
+
+/// The shape's own alpha, drawn into a `width` × `height` device-space grid at `placed`, nearest
+/// neighbor as `BrushRaster.draw` (interpolation quality `.none`) draws it, and nothing outside the
+/// rect the image is drawn in.
+fn coverage_levels(pixels: &Rgba8Image, placed: Rect, width: usize, height: usize) -> Vec<f32> {
+    let mut levels = vec![0.0f32; width * height];
+    if pixels.is_empty() || placed.width() <= 0.0 || placed.height() <= 0.0 {
+        return levels;
+    }
+    let (source_width, source_height) = (pixels.width(), pixels.height());
+    let data = pixels.data();
+    levels
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let point_y = y as f64 + 0.5;
+            if point_y < placed.min_y() || point_y >= placed.max_y() {
+                return;
+            }
+            for (x, value) in row.iter_mut().enumerate() {
+                let point_x = x as f64 + 0.5;
+                if point_x < placed.min_x() || point_x >= placed.max_x() {
+                    continue;
+                }
+                let sx = (((point_x - placed.min_x()) * source_width as f64 / placed.width()).floor()
+                    as i64)
+                    .clamp(0, source_width as i64 - 1) as usize;
+                let sy = (((point_y - placed.min_y()) * source_height as f64 / placed.height()).floor()
+                    as i64)
+                    .clamp(0, source_height as i64 - 1) as usize;
+                *value = data[(sy * source_width + sx) * 4 + 3] as f32 / 255.0;
+            }
+        });
+    levels
+}
+
+/// `GuidedMatte.image`: 0–1 levels back to a gray image.
+fn image_from_levels(levels: &[f32], width: usize, height: usize) -> Gray8Image {
+    let mut image = Gray8Image::new(width, height);
+    image
+        .data_mut()
+        .par_iter_mut()
+        .zip(levels.par_iter())
+        .for_each(|(byte, level)| {
+            *byte = (level * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+        });
+    image
+}
+
+/// `shape × (1 - outside)`, clamped: what the inner shadow and inner glow keep.
+fn inside_levels(shape: &[f32], outside: &[f32]) -> Vec<f32> {
+    shape
+        .par_iter()
+        .zip(outside.par_iter())
+        .map(|(shape, outside)| (shape * (1.0 - outside)).clamp(0.0, 1.0))
+        .collect()
+}
+
 // MARK: - The cache
 
 struct CacheEntry {
+    /// The address of the image the entry was made from: the same key the Swift's cache uses when
+    /// it compares `CGImage` identities. It is never dereferenced — the sizes beside it are what
+    /// the cache measures its budget with — so a caller that drops the image can never make this a
+    /// dangling read.
     image: *const Rgba8Image,
     mask: *const Gray8Image,
+    image_bytes: usize,
+    mask_pixels: usize,
     effects: LayerEffects,
     result: EffectsRender,
 }
 
-/// SAFETY: the keys are only ever compared as addresses while the owning `Arc`s are alive, exactly
-/// as the Swift cache compares `CGImage` identities.
+/// SAFETY: the addresses are only ever compared, never read through.
 unsafe impl Send for CacheEntry {}
 
 static CACHE: LazyLock<Mutex<Vec<CacheEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// The cost of one entry, as the Swift's cache measures it: the result plus what it was made from.
 fn entry_cost(entry: &CacheEntry) -> usize {
-    entry.result.image.size_bytes() + unsafe { (&*entry.image).size_bytes() }
-        + entry
-            .mask
-            .is_null()
-            .then_some(0)
-            .unwrap_or_else(|| unsafe { (&*entry.mask).pixel_count() })
+    entry.result.image.size_bytes() + entry.image_bytes + entry.mask_pixels
 }
 
 fn cache_result(
@@ -707,11 +929,14 @@ fn cache_result(
     let made = make()?;
     {
         let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let cost = made.image.size_bytes() + image.size_bytes() + mask.map_or(0, |mask| mask.pixel_count());
+        let mask_pixels = mask.map_or(0, |mask| mask.pixel_count());
+        let cost = made.image.size_bytes() + image.size_bytes() + mask_pixels;
         if cost <= CACHE_BUDGET_BYTES {
             cache.push(CacheEntry {
                 image: key,
                 mask: mask_key,
+                image_bytes: image.size_bytes(),
+                mask_pixels,
                 effects: effects.clone(),
                 result: made.clone(),
             });
@@ -725,20 +950,6 @@ fn cache_result(
     Ok(made)
 }
 
-/// The render the failures above are reported as: the same message, plus the empty result the
-/// caller falls back from.
-pub fn render_or_empty(
-    image: &Rgba8Image,
-    mask: Option<&Gray8Image>,
-    effects: &LayerEffects,
-) -> std::result::Result<EffectsRender, CoreError> {
-    let rendered = LayerEffectsRenderer::render(image, mask, effects)?;
-    if rendered.image.is_empty() {
-        return Err(render_failed());
-    }
-    Ok(rendered)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +957,7 @@ mod tests {
         ColorOverlayEffect, InnerGlowEffect, InnerShadowEffect, OuterGlowEffect, ShadowEffect,
         StrokeEffect,
     };
+    use compositor_core::layer_text::LayerTextStyle;
 
     fn white(width: usize, height: usize) -> Rgba8Image {
         let mut image = Rgba8Image::new(width, height);
@@ -759,6 +971,38 @@ mod tests {
 
     fn alpha(image: &Rgba8Image, x: usize, y: usize) -> u8 {
         image.get(x, y)[3]
+    }
+
+    /// A `size` × `size` image with a solid `inner` × `inner` square in its middle, as the Swift's
+    /// `createSquareImage`/`solidSquare` draw one.
+    fn square(size: usize, inner: usize, color: [u8; 4]) -> Rgba8Image {
+        let mut image = Rgba8Image::new(size, size);
+        let origin = (size - inner) / 2;
+        for y in origin..origin + inner {
+            for x in origin..origin + inner {
+                image.set(x, y, color);
+            }
+        }
+        image
+    }
+
+    /// A pixel's straight (unpremultiplied) color and alpha, as the Swift's `NSBitmapImageRep`
+    /// `colorAt` reports them.
+    fn straight(image: &Rgba8Image, x: usize, y: usize) -> [f64; 4] {
+        let pixel = image.get(x, y);
+        let channel = |value: u8| {
+            if pixel[3] == 0 {
+                0.0
+            } else {
+                (value as f64 * 255.0 / pixel[3] as f64).min(255.0) / 255.0
+            }
+        };
+        [
+            channel(pixel[0]),
+            channel(pixel[1]),
+            channel(pixel[2]),
+            pixel[3] as f64 / 255.0,
+        ]
     }
 
     #[test]
@@ -785,14 +1029,14 @@ mod tests {
         transform.origin = Point::new(100.0, 50.0);
         transform.size = compositor_core::geom::Size::new(40.0, 20.0);
         let image = Rgba8Image::new(40, 20);
-        let grown = LayerEffectsRenderer::placed(&transform, &image, 10.0);
-        // 40 * 40 / 20 = 80 wide, 20 * 20 / 0… the heights grow the same way: 20 * 40 / 20 = 40.
-        assert_eq!(grown.size.width, 80.0);
-        assert_eq!(grown.size.height, 40.0);
+        let grown = LayerEffectsRenderer::placed(&transform, &image, 5.0);
+        // The grid grew by 10 pixels a side: 40 * 40 / 30 wide, 20 * 20 / 10 tall.
+        assert!((grown.size.width - 40.0 * 40.0 / 30.0).abs() < 1e-9);
+        assert!((grown.size.height - 40.0).abs() < 1e-9);
         assert_eq!(grown.center().x, transform.center().x);
         assert_eq!(grown.center().y, transform.center().y);
-        assert_eq!(grown.origin.x, 120.0 - 40.0);
-        assert_eq!(grown.origin.y, 60.0 - 20.0);
+        assert!((grown.origin.x - (transform.center().x - grown.size.width / 2.0)).abs() < 1e-9);
+        assert!((grown.origin.y - (transform.center().y - grown.size.height / 2.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -835,13 +1079,17 @@ mod tests {
 
     #[test]
     fn shift_moves_bilinearly_and_zero_offset_copies() {
-        let source = vec![0.0, 1.0, 0.0, 0.0];
+        // The bright sample sits at (0, 0); the shift samples the source at `x - dx`.
+        let source = vec![1.0, 0.0, 0.0, 0.0];
         assert_eq!(shift(&source, 2, 2, 0.0, 0.0), source);
         let moved = shift(&source, 2, 2, 1.0, 0.0);
-        assert_eq!(moved, vec![0.0, 0.0, 0.0, 1.0]);
-        // Half a pixel between the two: the sample lies between the two columns.
+        assert_eq!(moved, vec![0.0, 1.0, 0.0, 0.0]);
+        // Half a pixel between the two columns: the sample lands between them.
         let half = shift(&source, 2, 2, 0.5, 0.0);
         assert!((half[1] - 0.5).abs() < 1e-6, "{half:?}");
+        // Past the far edge there is nothing, however far the shift asks.
+        let far = shift(&source, 2, 2, 4.0, 0.0);
+        assert_eq!(far, vec![0.0; 4]);
     }
 
     #[test]
@@ -851,14 +1099,29 @@ mod tests {
         for value in blurred {
             assert!((value - 1.0).abs() < 1e-5, "{value}");
         }
-        // A single bright pixel spreads symmetrically.
-        let mut dot = vec![0.0f32; 25];
-        dot[12] = 1.0;
-        let spread = blur(&dot, 5, 5, 1.0);
-        assert!((spread[12] - spread[7]).abs() < 1e-6);
-        assert!((spread[12] - spread[11]).abs() < 1e-6);
-        assert!(spread[12] > spread[0]);
-        assert!(spread[0] > 0.0);
+        // A single bright pixel spreads by the kernel's own weights: the two passes multiply, so the
+        // center keeps `(w0 / Σw)²` of the light.
+        let mut dot = vec![0.0f32; 21 * 21];
+        dot[10 * 21 + 10] = 1.0;
+        let spread = blur(&dot, 21, 21, 1.0);
+        let weights = blur_weights(1.0, 3);
+        let center = weights[(weights.len() - 1) / 2];
+        let total: f32 = weights.iter().sum();
+        let expected = (center / total) * (center / total);
+        assert!(
+            (spread[10 * 21 + 10] - expected).abs() < 1e-5,
+            "{} vs {expected}",
+            spread[10 * 21 + 10]
+        );
+        // Mirror pairs match, and the light falls off away from the center.
+        for (a, b) in [(10 * 21 + 10 - 1, 10 * 21 + 10 + 1), (10 * 21 + 10 - 21, 10 * 21 + 10 + 21)] {
+            assert!((spread[a] - spread[b]).abs() < 1e-6);
+        }
+        assert!(spread[10 * 21 + 10] > spread[10 * 21 + 9]);
+        assert!(spread[10 * 21 + 9] > spread[10 * 21 + 8]);
+        // Three taps of reach, and nothing beyond it: the kernel's own radius.
+        assert!(spread[7 * 21 + 7] > 0.0);
+        assert_eq!(spread[6 * 21 + 10], 0.0);
     }
 
     #[test]
@@ -984,6 +1247,121 @@ mod tests {
     }
 
     #[test]
+    fn coverage_places_the_shapes_alpha_in_the_grid_it_is_given() {
+        let mut pixels = Rgba8Image::new(4, 4);
+        for y in 1..3 {
+            for x in 1..3 {
+                pixels.set(x, y, [255, 255, 255, 128]);
+            }
+        }
+        let image = LayerEffectsRenderer::coverage(
+            &pixels,
+            Rect::new(2.0, 3.0, 4.0, 4.0),
+            Size::new(10.0, 10.0),
+            0.0,
+        )
+        .expect("coverage");
+        assert_eq!(image.width(), 10);
+        assert_eq!(image.height(), 10);
+        // The shape's half alpha lands where the image was placed, and nowhere else.
+        assert_eq!(image.get(2, 3), 0);
+        assert_eq!(image.get(3, 4), 128);
+        assert_eq!(image.get(4, 5), 128);
+        assert_eq!(image.get(5, 5), 0);
+        assert_eq!(image.get(6, 6), 0);
+        assert_eq!(image.get(0, 0), 0);
+    }
+
+    #[test]
+    fn a_stroke_ring_is_the_shape_grown_less_the_shape() {
+        let mut pixels = Rgba8Image::new(5, 5);
+        pixels.set(2, 2, [255, 255, 255, 255]);
+        let stroke = StrokeEffect { size: 1.0, ..StrokeEffect::default() };
+        let ring = LayerEffectsRenderer::ring_coverage(&pixels, Size::new(5.0, 5.0), &stroke)
+            .expect("ring");
+        assert_eq!(ring.get(1, 2), 255);
+        assert_eq!(ring.get(2, 1), 255);
+        assert_eq!(ring.get(1, 1), 255);
+        assert_eq!(ring.get(2, 2), 0);
+        assert_eq!(ring.get(0, 2), 0);
+        // An inside stroke turns the ring inward: the ring covers only the shape's own edge.
+        let inside = StrokeEffect { size: 1.0, inside: true, ..StrokeEffect::default() };
+        let full = Rgba8Image::opaque(5, 5, [255, 255, 255, 255]);
+        let ring = LayerEffectsRenderer::ring_coverage(&full, Size::new(5.0, 5.0), &inside)
+            .expect("ring");
+        assert_eq!(ring.get(0, 0), 255);
+        assert_eq!(ring.get(2, 2), 0);
+    }
+
+    #[test]
+    fn an_outer_glow_is_nothing_inside_the_shape() {
+        let mut pixels = Rgba8Image::new(11, 11);
+        for y in 4..7 {
+            for x in 4..7 {
+                pixels.set(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let glow = OuterGlowEffect { size: 4.0, ..OuterGlowEffect::default() };
+        let coverage = LayerEffectsRenderer::outer_glow_coverage(
+            &pixels,
+            Rect::new(0.0, 0.0, 11.0, 11.0),
+            Size::new(11.0, 11.0),
+            &glow,
+        )
+        .expect("glow");
+        assert_eq!(coverage.get(5, 5), 0);
+        assert!(coverage.get(3, 5) > 0);
+        assert!(coverage.get(3, 5) > coverage.get(0, 5));
+    }
+
+    #[test]
+    fn an_inner_shadow_keeps_the_shape_and_removes_what_moved_over_it() {
+        let pixels = white(9, 9);
+        let shadow = InnerShadowEffect { distance: 2.0, blur: 0.0, angle: 90.0, ..InnerShadowEffect::default() };
+        let coverage = LayerEffectsRenderer::inner_coverage(
+            &pixels,
+            Rect::new(0.0, 0.0, 9.0, 9.0),
+            Size::new(9.0, 9.0),
+            &shadow,
+        )
+        .expect("inner shadow");
+        // The shadow falls downward: the top edge keeps the most, the bottom the least.
+        assert!(coverage.get(4, 0) > coverage.get(4, 8));
+        assert!(coverage.get(4, 8) == 0);
+    }
+
+    #[test]
+    fn extreme_matches_a_brute_force_window() {
+        let source: Vec<f32> = (0..35).map(|index| (index % 7) as f32 / 7.0).collect();
+        let (width, height, reach) = (7usize, 5usize, 2i32);
+        for smallest in [false, true] {
+            let fast = LayerEffectsRenderer::extreme(&source, width, height, reach, smallest);
+            let mut slow = vec![0.0f32; source.len()];
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    let mut best = if smallest { 1.0f32 } else { 0.0f32 };
+                    for dy in -reach..=reach {
+                        for dx in -reach..=reach {
+                            let (sx, sy) = (x + dx, y + dy);
+                            let value = if sx < 0 || sy < 0 || sx >= width as i32 || sy >= height as i32 {
+                                0.0
+                            } else {
+                                source[sy as usize * width + sx as usize]
+                            };
+                            best = if smallest { best.min(value) } else { best.max(value) };
+                        }
+                    }
+                    slow[y as usize * width + x as usize] = best;
+                }
+            }
+            assert_eq!(fast, slow, "smallest: {smallest}");
+        }
+        // A degenerate window is a copy.
+        assert_eq!(LayerEffectsRenderer::extreme(&source, width, height, 0, false), source);
+        assert!(LayerEffectsRenderer::extreme(&[], 0, 0, 1, false).is_empty());
+    }
+
+    #[test]
     fn hidden_effects_render_nothing_at_all() {
         let pixels = white(3, 3);
         let effects = LayerEffects {
@@ -993,5 +1371,264 @@ mod tests {
             ..LayerEffects::default()
         };
         assert!(LayerEffectsRenderer::cached(&pixels, None, Some(&effects)).is_none());
+    }
+
+    /// An outer glow is cast omnidirectionally: the source keeps its own pixels and the glow shows
+    /// on all four sides, symmetric about the shape.
+    #[test]
+    fn outer_glow_renders_omnidirectionally() {
+        // 40 × 40 with a 20 × 20 solid white square in the middle (10, 10 to 30, 30).
+        let image = square(40, 20, [255, 255, 255, 255]);
+        let effects = LayerEffects {
+            outer_glow: Some(OuterGlowEffect {
+                size: 10.0,
+                red: 0.0,
+                green: 1.0,
+                blue: 0.0,
+                opacity: 1.0,
+                ..OuterGlowEffect::default()
+            }),
+            ..LayerEffects::default()
+        };
+        let rendered = LayerEffectsRenderer::render(&image, None, &effects).expect("render");
+        assert!(rendered.inset > 0.0);
+        let inset = rendered.inset as usize;
+
+        // The source's interior stays intact and sharp white.
+        let center = straight(&rendered.image, inset + 20, inset + 20);
+        assert!(center[3] > 0.95, "{center:?}");
+        assert!(center[0] > 0.95 && center[1] > 0.95 && center[2] > 0.95, "{center:?}");
+
+        // Pixels outside the square carry the green glow.
+        let left = straight(&rendered.image, inset + 5, inset + 20);
+        let right = straight(&rendered.image, inset + 35, inset + 20);
+        let top = straight(&rendered.image, inset + 20, inset + 5);
+        let bottom = straight(&rendered.image, inset + 20, inset + 35);
+        for glow in [left, right, top, bottom] {
+            assert!(glow[3] > 0.1, "{glow:?}");
+            assert!(glow[1] > 0.8, "{glow:?}");
+        }
+        // Omnidirectional symmetry: the four points are the same distance out, so their alphas match.
+        assert!((left[3] - right[3]).abs() < 0.05, "{left:?} vs {right:?}");
+        assert!((top[3] - bottom[3]).abs() < 0.05, "{top:?} vs {bottom:?}");
+        assert!((left[3] - top[3]).abs() < 0.05, "{left:?} vs {top:?}");
+    }
+
+    /// A bigger glow needs more room and reaches further; a higher opacity is brighter at the same
+    /// distance.
+    #[test]
+    fn outer_glow_size_and_opacity_variations() {
+        let image = square(40, 20, [255, 255, 255, 255]);
+        let glow = |size: f64, opacity: f64| LayerEffects {
+            outer_glow: Some(OuterGlowEffect {
+                size,
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                opacity,
+                ..OuterGlowEffect::default()
+            }),
+            ..LayerEffects::default()
+        };
+        let render =
+            |effects: &LayerEffects| LayerEffectsRenderer::render(&image, None, effects).expect("render");
+
+        // A size-20 glow grows the grid further than a size-4 one.
+        let small = render(&glow(4.0, 1.0));
+        let large = render(&glow(20.0, 1.0));
+        assert!(large.inset > small.inset, "{} vs {}", large.inset, small.inset);
+        // Sample 8 px outside the square, which starts at inset + 10.
+        let small_far = alpha(&small.image, small.inset as usize + 2, small.inset as usize + 20);
+        let large_far = alpha(&large.image, large.inset as usize + 2, large.inset as usize + 20);
+        assert!(large_far > small_far, "a larger glow reaches further out: {large_far} vs {small_far}");
+
+        // Opacity 1 is brighter than opacity 0.2 at the same point.
+        let low = render(&glow(10.0, 0.2));
+        let high = render(&glow(10.0, 1.0));
+        let low_sample = alpha(&low.image, low.inset as usize + 5, low.inset as usize + 20);
+        let high_sample = alpha(&high.image, high.inset as usize + 5, high.inset as usize + 20);
+        assert!(high_sample > low_sample, "opacity 1 vs 0.2: {high_sample} vs {low_sample}");
+    }
+
+    /// The glow follows a glyph's outline: it surrounds the strokes and reaches into the concave
+    /// corners, while the letters keep their own pixels.
+    #[test]
+    fn outer_glow_renders_around_text_glyphs() {
+        // A T-shaped silhouette on a transparent background: the top bar spans x 15…45, y 15…23 and
+        // the stem x 26…34, y 23…45, in a 60 × 60 image.
+        let mut image = Rgba8Image::new(60, 60);
+        for y in 15..23 {
+            for x in 15..45 {
+                image.set(x, y, [255, 255, 255, 255]);
+            }
+        }
+        for y in 23..45 {
+            for x in 26..34 {
+                image.set(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let effects = LayerEffects {
+            outer_glow: Some(OuterGlowEffect {
+                size: 8.0,
+                red: 0.0,
+                green: 1.0,
+                blue: 1.0,
+                opacity: 1.0,
+                ..OuterGlowEffect::default()
+            }),
+            ..LayerEffects::default()
+        };
+        let rendered = LayerEffectsRenderer::render(&image, None, &effects).expect("render");
+        let inset = rendered.inset as usize;
+
+        // A point inside the stem stays white.
+        let stem = straight(&rendered.image, inset + 30, inset + 30);
+        assert!(stem[3] > 0.9, "{stem:?}");
+        assert!(stem[0] > 0.9 && stem[1] > 0.9 && stem[2] > 0.9, "{stem:?}");
+
+        // 3 px above the top bar of the T, outside the silhouette: cyan glow.
+        let top = straight(&rendered.image, inset + 30, inset + 12);
+        assert!(top[3] > 0.05, "{top:?}");
+        assert!(top[1] > 0.5 && top[2] > 0.5, "{top:?}");
+
+        // The concave notch under the left arm, outside the silhouette.
+        let notch = straight(&rendered.image, inset + 20, inset + 27);
+        assert!(notch[3] > 0.05, "{notch:?}");
+        assert!(notch[1] > 0.5 && notch[2] > 0.5, "{notch:?}");
+    }
+
+    /// The glow sits between the stroke and the pixels, and the drop shadow falls behind them all.
+    #[test]
+    fn outer_glow_combined_with_stroke_and_drop_shadow() {
+        let image = square(50, 20, [255, 255, 255, 255]);
+        let effects = LayerEffects {
+            stroke: Some(StrokeEffect {
+                size: 3.0,
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                opacity: 1.0,
+                inside: false,
+                ..StrokeEffect::default()
+            }),
+            outer_glow: Some(OuterGlowEffect {
+                size: 10.0,
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                opacity: 1.0,
+                ..OuterGlowEffect::default()
+            }),
+            // Angle 180 casts the shadow at dx = +25, dy = 0 (a layer's pixels count y downward).
+            shadow: Some(ShadowEffect {
+                angle: 180.0,
+                distance: 25.0,
+                blur: 4.0,
+                red: 0.0,
+                green: 0.0,
+                blue: 1.0,
+                opacity: 1.0,
+                ..ShadowEffect::default()
+            }),
+            ..LayerEffects::default()
+        };
+        let rendered = LayerEffectsRenderer::render(&image, None, &effects).expect("render");
+        let inset = rendered.inset as usize;
+        let center = (inset + 25, inset + 25);
+
+        // The center of the source is still white.
+        let middle = straight(&rendered.image, center.0, center.1);
+        assert!(middle[0] > 0.9 && middle[1] > 0.9 && middle[2] > 0.9, "{middle:?}");
+
+        // The stroke, 2 px outside the 20 × 20 square's border, is black and opaque.
+        let stroke = straight(&rendered.image, inset + 13, center.1);
+        assert!(stroke[3] > 0.9, "{stroke:?}");
+        assert!(stroke[0] < 0.2 && stroke[1] < 0.2 && stroke[2] < 0.2, "{stroke:?}");
+
+        // The glow, to the left of the square (away from the shadow), is red.
+        let glow = straight(&rendered.image, inset + 10, center.1);
+        assert!(glow[3] > 0.05, "{glow:?}");
+        assert!(glow[0] > 0.6, "{glow:?}");
+
+        // The shadow, 25 px right of the center, is blue.
+        let shadow = straight(&rendered.image, center.0 + 25, center.1);
+        assert!(shadow[3] > 0.1, "{shadow:?}");
+        assert!(shadow[2] > 0.6, "{shadow:?}");
+    }
+
+    /// An inner glow stays inside the source: the grid does not grow, the padding stays clear, and
+    /// the tint reaches inwards from the edge.
+    #[test]
+    fn inner_glow_renders_inside_source_without_bounds_expansion() {
+        let source = square(40, 40, [0, 0, 0, 255]); // a black square filling the image
+        let effects = LayerEffects {
+            inner_glow: Some(InnerGlowEffect {
+                size: 12.0,
+                red: 1.0,
+                green: 1.0,
+                blue: 0.0, // yellow
+                opacity: 1.0,
+                ..InnerGlowEffect::default()
+            }),
+            ..LayerEffects::default()
+        };
+        // An inner glow needs no room: the margin stays the baseline.
+        assert_eq!(LayerEffectsRenderer::margin(&effects), 2.0);
+
+        let rendered = LayerEffectsRenderer::render(&source, None, &effects).expect("render");
+        let inset = rendered.inset as usize;
+
+        // The outer padding stays completely transparent.
+        assert_eq!(straight(&rendered.image, 0, 0)[3], 0.0);
+
+        // 2 px inside the edge the yellow glow tints the black square.
+        let edge = straight(&rendered.image, inset + 2, inset + 20);
+        assert!(edge[3] > 0.9, "{edge:?}");
+        assert!(edge[0] > 0.3 && edge[1] > 0.3, "{edge:?}");
+
+        // In the deep center the black source dominates.
+        let center = straight(&rendered.image, inset + 20, inset + 20);
+        assert!(center[0] < 0.2 && center[1] < 0.2, "{center:?}");
+    }
+
+    /// The inner glow follows a glyph's outline from the inside, over the letters' own pixels.
+    #[test]
+    fn inner_glow_renders_around_text_glyphs() {
+        if !crate::text::fonts_available() {
+            return;
+        }
+        // "O" at 72 pt in black, rasterized as the editor's text layers are.
+        let style = LayerTextStyle {
+            content: "O".to_string(),
+            ..LayerTextStyle::default()
+        };
+        let text = crate::text::text_image(&style).expect("a valid style rasterizes");
+        let effects = LayerEffects {
+            inner_glow: Some(InnerGlowEffect {
+                size: 8.0,
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0, // red
+                opacity: 0.9,
+                ..InnerGlowEffect::default()
+            }),
+            ..LayerEffects::default()
+        };
+        let rendered = LayerEffectsRenderer::render(&text, None, &effects).expect("render");
+        assert!(rendered.image.width() >= text.width());
+        assert!(rendered.image.height() >= text.height());
+        let inset = rendered.inset as usize;
+
+        // Outside the glyphs' bounds stays transparent.
+        assert_eq!(straight(&rendered.image, 0, 0)[3], 0.0);
+
+        // Somewhere on a letter the glow tints an opaque pixel red.
+        let found = (inset..rendered.image.height() - inset).any(|y| {
+            (inset..rendered.image.width() - inset).any(|x| {
+                let pixel = straight(&rendered.image, x, y);
+                pixel[3] > 0.5 && pixel[0] > 0.3
+            })
+        });
+        assert!(found, "an inner glow tints the letters");
     }
 }
