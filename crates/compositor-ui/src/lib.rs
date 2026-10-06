@@ -16,3 +16,5 @@ pub mod toolbar;
 pub mod widgets;
 pub mod workspace;
 
+pub use content_view::ContentView;
+pub use workspace::ProjectWorkspaceView;
