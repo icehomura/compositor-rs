@@ -329,7 +329,31 @@ mod tests {
         assert_eq!(LayoutGrid::new(64, 8).step(), 8.0);
         // Subdivisions can never be finer than a pixel.
         assert_eq!(LayoutGrid::new(2, 64).subdivisions, 2);
-        assert_eq!(LayoutGrid::new(64, 8).step(), 8.0);
+        // Ported from CompositorTests.GuideTests.layoutGridKeepsToItsLimits: spacing 10 caps at 10.
+        assert_eq!(LayoutGrid::new(10, 40).subdivisions, 10, "no finer than a pixel");
+        assert_eq!(LayoutGrid::new(1_000_000, 1_000).spacing, *LayoutGrid::SPACING_RANGE.end());
+        assert_eq!(LayoutGrid::new(1_000_000, 1_000).subdivisions, *LayoutGrid::SUBDIVISION_RANGE.end());
+    }
+
+    #[test]
+    fn layout_grid_takes_its_spacing_and_subdivisions() {
+        // Ported from CompositorTests.GuideTests.layoutGridTakesItsSpacingAndSubdivisions.
+        let grid = LayoutGrid::new(100, 4);
+        assert_eq!(
+            grid.lines(200.0),
+            vec![0.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0, 175.0, 200.0]
+        );
+        assert!(grid.is_major(100.0) && !grid.is_major(50.0));
+
+        // An uneven step still lands on every major line.
+        let thirds = LayoutGrid::new(100, 3);
+        let majors: Vec<CGFloat> = thirds
+            .lines(300.0)
+            .into_iter()
+            .filter(|value| thirds.is_major(*value))
+            .collect();
+        assert_eq!(majors, vec![0.0, 100.0, 200.0, 300.0]);
+        assert_eq!(LayoutGrid::new(50, 1).lines(120.0), vec![0.0, 50.0, 100.0]);
     }
 
     #[test]
@@ -373,6 +397,25 @@ mod tests {
         assert_eq!(GridAppearanceStyle::DashedLines.dashes(), &[4.0, 3.0]);
         assert_eq!(GridAppearanceStyle::Dots.dashes(), &[1.0, 2.0]);
         assert_eq!(GridAppearanceStyle::from_raw("Dashed Lines"), Some(GridAppearanceStyle::DashedLines));
+    }
+
+    #[test]
+    fn grid_appearance_colors_and_styles() {
+        // Ported from CompositorTests.GuideTests.gridAppearanceColorsAndStyles — the assertions the
+        // alpha/color test above does not already make.
+        let standard = GridAppearance::default();
+        assert_eq!(standard.preset, GridAppearancePreset::LightGray);
+        assert_eq!(standard.style, GridAppearanceStyle::Lines);
+        assert!(GridAppearancePreset::ALL
+            .iter()
+            .all(|preset| preset.color().is_none() == (*preset == GridAppearancePreset::Custom)));
+
+        let mut appearance = standard;
+        appearance.opacity = 100;
+        assert_eq!(appearance.major_alpha(), 1.0);
+        assert!(appearance.subdivision_alpha() < 1.0, "subdivisions stay fainter than the majors");
+        appearance.opacity = 0;
+        assert_eq!(appearance.major_alpha(), 0.01, "a grid that's on never disappears");
     }
 
     #[test]

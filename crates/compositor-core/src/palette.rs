@@ -183,6 +183,15 @@ mod tests {
     }
 
     #[test]
+    fn hsb_round_trips_eight_bit_colors() {
+        // Ported from CompositorTests.ColorPickerTests.hsbRoundTripsEightBitColors.
+        for hex in ["000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FF8000", "7F3FA2", "123456"] {
+            let color = PaletteColor::from_hex(hex).expect(hex);
+            assert_eq!(PickerHSB::from_color(color).rgb().quantized().hex(), hex, "{hex} did not survive the wheel");
+        }
+    }
+
+    #[test]
     fn hue_survives_dragging_through_grays_and_black() {
         let mut hsb = PickerHSB::from_color(PaletteColor::new(1.0, 0.0, 0.0));
         let hue = hsb.hue;

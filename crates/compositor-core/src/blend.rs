@@ -201,9 +201,15 @@ mod tests {
     fn raw_values_round_trip_and_match_the_manifest() {
         for mode in LayerBlendMode::ALL {
             assert_eq!(LayerBlendMode::from_raw(mode.raw_value()), Some(mode));
+            // Ported from CompositorTests.LayerAppearanceTests.blendModesAndOpacityMatchKnownPixels:
+            // every mode survives the manifest's JSON encoding.
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.raw_value()));
+            assert_eq!(serde_json::from_str::<LayerBlendMode>(&json).unwrap(), mode);
         }
         assert_eq!(LayerBlendMode::LinearDodge.raw_value(), "Linear Dodge (Add)");
         assert_eq!(LayerBlendMode::from_raw("Nope"), None);
+        assert_eq!(LayerBlendMode::default(), LayerBlendMode::Normal);
     }
 
     #[test]

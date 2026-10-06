@@ -501,13 +501,53 @@ mod tests {
 
     #[test]
     fn magic_trick_and_the_transform_that_undoes_it() {
-        // The Swift `placing(_:)` path relies on `unitToDocument.concatenating(old.inverted())`.
+        // The Swift `placing(_:)` path relies on `unitToDocument.concatenating(old.inverted())`;
+        // Swift's `concatenating` reads receiver-first, so `then` is the port of it here.
         let unit = AffineTransform::new(20.0, 0.0, 0.0, 10.0, 5.0, 7.0);
         let inverse = unit.inverted();
-        let roundtrip = unit.concatenating(inverse);
+        let roundtrip = unit.then(inverse);
         assert!(roundtrip.is_identity() || (roundtrip.a - 1.0).abs() < 1e-12);
         let p = unit.applying(Point::new(0.5, 0.5));
         assert!((p.x - 15.0).abs() < 1e-9 && (p.y - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn then_composes_receiver_first_like_swift_concatenating() {
+        // Swift `translation(10).concatenating(scale(2))` applies the translation first, then the
+        // scale: 1 -> 11 -> 22. That reading is `then`; Rust's raw `concatenating` is the reverse
+        // (CoreGraphics argument order: the scale runs first, 1 -> 2 -> 12).
+        let receiver_first = AffineTransform::translation(10.0, 0.0).then(AffineTransform::scale(2.0, 2.0));
+        assert_eq!(receiver_first.applying(Point::new(1.0, 0.0)), Point::new(22.0, 0.0));
+        let argument_first =
+            AffineTransform::translation(10.0, 0.0).concatenating(AffineTransform::scale(2.0, 2.0));
+        assert_eq!(argument_first.applying(Point::new(1.0, 0.0)), Point::new(12.0, 0.0));
+    }
+
+    #[test]
+    fn scaled_by_translated_by_and_rotated_by_prepend_like_coregraphics() {
+        // CGAffineTransformScale/Translate/Rotate left-multiply the existing transform, so the
+        // newest operation runs first on a point: scaled then translated gives 1 -> 11 -> 22,
+        // while translated then scaled gives 1 -> 2 -> 12.
+        let translated_after_scale = AffineTransform::IDENTITY
+            .scaled_by(2.0, 2.0)
+            .translated_by(10.0, 0.0);
+        assert_eq!(
+            translated_after_scale.applying(Point::new(1.0, 0.0)),
+            Point::new(22.0, 0.0)
+        );
+        let scaled_after_translation = AffineTransform::IDENTITY
+            .translated_by(10.0, 0.0)
+            .scaled_by(2.0, 2.0);
+        assert_eq!(
+            scaled_after_translation.applying(Point::new(1.0, 0.0)),
+            Point::new(12.0, 0.0)
+        );
+        // The rotation prepends too: rotate (1, 0) a quarter turn first, then translate.
+        let rotated = AffineTransform::translation(10.0, 0.0)
+            .rotated_by(std::f64::consts::FRAC_PI_2);
+        let turned = rotated.applying(Point::new(1.0, 0.0));
+        assert!((turned.x - 10.0).abs() < 1e-12);
+        assert!((turned.y - 1.0).abs() < 1e-12);
     }
 
     #[test]

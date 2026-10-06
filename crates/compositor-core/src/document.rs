@@ -715,6 +715,13 @@ mod tests {
         assert_eq!(CanvasDocument::valid_dimension("-5"), None);
         assert_eq!(CanvasDocument::valid_dimension("nine"), None);
         assert_eq!(CanvasDocument::valid_dimension(""), None);
+        // Ported from CompositorTests.CompositorTests.dimensionValidation.
+        assert_eq!(CanvasDocument::valid_dimension("1.5"), None, "a fractional size is not a dimension");
+        assert_eq!(
+            CanvasDocument::valid_dimension("9999999999999999999999"),
+            None,
+            "an overflowing number is not a dimension"
+        );
 
         let document = CanvasDocument::new(64, 32);
         assert_eq!(document.size(), Size::new(64.0, 32.0));

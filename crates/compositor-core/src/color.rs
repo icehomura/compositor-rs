@@ -178,6 +178,12 @@ mod tests {
         assert_eq!(PaletteColor::new(1.0, 0.5, 0.0).hex(), "FF8000");
         assert_eq!(PaletteColor::from_hex("#GGGGGG"), None);
         assert_eq!(PaletteColor::from_hex("ffffff"), Some(PaletteColor::WHITE));
+
+        // Ported from CompositorTests.ColorPickerTests.hexParsesFullShorthandAndRejectsInvalid.
+        assert_eq!(PaletteColor::from_hex("#FF8000"), Some(PaletteColor::new(1.0, 128.0 / 255.0, 0.0)));
+        assert_eq!(PaletteColor::from_hex("0f0"), Some(PaletteColor::new(0.0, 1.0, 0.0)));
+        assert_eq!(PaletteColor::from_hex(" 00ff00 "), Some(PaletteColor::new(0.0, 1.0, 0.0)));
+        assert_eq!(PaletteColor::from_hex("12345"), None, "five digits are not a color");
     }
 
     #[test]
