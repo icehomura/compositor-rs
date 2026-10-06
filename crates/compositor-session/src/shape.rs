@@ -144,7 +144,7 @@ impl EditorSession {
         let foreground = self.foreground_color();
         let image = match EditorSession::shape_image(
             draft.kind,
-            rect.size(),
+            Size::new(rect.width(), rect.height()),
             foreground,
             draft.corner_radius,
             thickness,
@@ -292,7 +292,7 @@ impl EditorSession {
     pub fn shape_image(
         kind: ShapeKind,
         size: Size,
-        color: compositor_core::palette::PaletteColor,
+        color: compositor_core::color::PaletteColor,
         corner_radius: f64,
         line_width: f64,
         start: Option<Point>,
@@ -368,7 +368,7 @@ fn stroke_path(from: Point, to: Point, thickness: f64) -> Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compositor_core::palette::PaletteColor;
+    use compositor_core::color::PaletteColor;
 
     /// The shape kinds step Rectangle → Ellipse → Line → Rectangle (Tab and Shift-U).
     #[test]
@@ -389,6 +389,11 @@ mod tests {
     fn shift_drag_snaps_a_line_angle() {
         let mut session = EditorSession::default();
         session.tool = NavigationTool::Shape;
+        // Upstream's `makeSession()` opens a document first (`ShapeToolTests.swift:7-13`);
+        // `beginShape` requires `canEditLayers`, which requires one (`ShapeTool.swift:71`).
+        let mut document = compositor_core::document::CanvasDocument::new(64, 64);
+        document.layers = vec![ImageLayer::blank("Layer 1", Size::new(64.0, 64.0))];
+        session.document = Some(document);
         session.shape_kind = ShapeKind::Line;
         session.begin_shape(Point::new(10.0, 10.0));
         session.drag_shape(Point::new(40.0, 13.0), true, false);
@@ -398,7 +403,7 @@ mod tests {
 
         session.drag_shape(Point::new(10.0, 40.0), true, false);
         let end = session.shape_draft.as_ref().expect("a draft").end.expect("a line end");
-        assert_eq!(end.x, 10.0, "a nearly upright drag snaps upright");
+        assert!((end.x - 10.0).abs() < 1e-9, "a nearly upright drag snaps upright");
     }
 
     /// Shift squares a rectangle's box; Option grows it from where the drag started.
@@ -406,6 +411,11 @@ mod tests {
     fn shift_and_option_shape_the_drag_box() {
         let mut session = EditorSession::default();
         session.tool = NavigationTool::Shape;
+        // As above, upstream's `makeSession()` has a document before `beginShape`
+        // (`ShapeToolTests.swift:7-13`, `ShapeTool.swift:71`).
+        let mut document = compositor_core::document::CanvasDocument::new(64, 64);
+        document.layers = vec![ImageLayer::blank("Layer 1", Size::new(64.0, 64.0))];
+        session.document = Some(document);
         session.begin_shape(Point::new(10.0, 10.0));
         session.drag_shape(Point::new(40.0, 20.0), true, false);
         assert_eq!(

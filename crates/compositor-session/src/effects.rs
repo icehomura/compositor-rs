@@ -12,11 +12,10 @@
 //! `active_layer()`, `can_edit_layers()`, `select_layer(Option<Id>)`, `finish_opacity_edit()`,
 //! `begin_edit(&str)`, `end_edit()`, `close_color_picker(bool)`.
 
-use compositor_core::document::CanvasDocument;
 use compositor_core::layer_effects::{LayerEffectKind, LayerEffectSelection, LayerEffects, StrokeEffect, ColorOverlayEffect};
+use compositor_core::palette::ColorPickerTarget;
 use compositor_core::Id;
 
-use crate::color::ColorPickerTarget;
 use crate::EditorSession;
 
 impl EditorSession {
@@ -305,6 +304,183 @@ impl EditorSession {
     fn aliases_effect_picker(&self) -> bool {
         self.color_picker
             .as_ref()
-            .is_some_and(|picker| matches!(picker.target, ColorPickerTarget::Effect(_)))
+            .is_some_and(|picker| matches!(picker.target, ColorPickerTarget::Effect { .. }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compositor_core::buffer::Rgba8Image;
+    use compositor_core::color::PaletteColor;
+    use compositor_core::document::{CanvasDocument, ImageLayer};
+    use compositor_core::geom::Point;
+    use compositor_core::imported_image::{ImportedImage, PixelImage};
+    use compositor_core::layer_effects::{ShadowEffect, StrokeEffect};
+    use std::sync::Arc;
+
+    /// A layer with pixels of its own: effects need one (`canEditEffects`).
+    fn image_layer(name: &str) -> ImageLayer {
+        let asset = ImportedImage::new(
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8))),
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(4, 4))),
+            name,
+        );
+        ImageLayer::from_asset(asset, Point::ZERO)
+    }
+
+    fn session_with_layer() -> (EditorSession, Id) {
+        let mut session = EditorSession::default();
+        let layer = image_layer("Imported");
+        let id = layer.id;
+        let mut document = CanvasDocument::new(64, 64);
+        document.layers.push(layer);
+        session.document = Some(document);
+        session.set_active_layer(Some(id));
+        (session, id)
+    }
+
+    fn effects_of(session: &EditorSession, id: Id) -> LayerEffects {
+        session
+            .document
+            .as_ref()
+            .and_then(|document| document.layers.iter().find(|layer| layer.id == id))
+            .and_then(|layer| layer.effects.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn adding_an_effect_opens_its_panel_and_records_the_add() {
+        let (mut session, id) = session_with_layer();
+        session.add_effect(LayerEffectKind::Shadow);
+        assert!(effects_of(&session, id).shadow.is_some());
+        assert_eq!(session.effects_editing, Some(LayerEffectSelection::new(id, LayerEffectKind::Shadow)));
+        assert_eq!(session.effect_selection, Some(LayerEffectSelection::new(id, LayerEffectKind::Shadow)));
+        assert!(session.effects_editing_original.is_some(), "the value Cancel restores");
+        assert_eq!(session.history.undo_name(), "Add Drop Shadow");
+
+        // Asking for the effect the panel is already on changes nothing.
+        let steps = session.history.undo_count();
+        session.add_effect(LayerEffectKind::Shadow);
+        assert_eq!(session.history.undo_count(), steps);
+    }
+
+    #[test]
+    fn a_new_stroke_and_overlay_take_the_background_color() {
+        let (mut session, id) = session_with_layer();
+        session.background_color = PaletteColor::new(0.25, 0.5, 0.75);
+        session.add_effect(LayerEffectKind::Stroke);
+        let stroke = effects_of(&session, id).stroke.expect("the stroke");
+        assert_eq!((stroke.red, stroke.green, stroke.blue), (0.25, 0.5, 0.75));
+        assert_eq!(session.history.undo_name(), "Add Stroke");
+
+        session.finish_effects_editing(false);
+        session.add_effect(LayerEffectKind::ColorOverlay);
+        let overlay = effects_of(&session, id).color_overlay.expect("the overlay");
+        assert_eq!((overlay.red, overlay.green, overlay.blue), (0.25, 0.5, 0.75));
+    }
+
+    #[test]
+    fn cancelling_a_new_effect_removes_it_again() {
+        let (mut session, id) = session_with_layer();
+        session.add_effect(LayerEffectKind::Shadow);
+        session.finish_effects_editing(false);
+        assert!(effects_of(&session, id).is_empty(), "Cancel removes the effect it added");
+        assert_eq!(session.history.undo_name(), "Cancel Drop Shadow");
+        assert!(session.effects_editing.is_none());
+        assert!(session.effect_selection.is_none(), "the panel has nothing to point at");
+    }
+
+    #[test]
+    fn cancelling_an_edited_effect_restores_only_that_kind() {
+        let (mut session, id) = session_with_layer();
+        let mut effects = LayerEffects::default();
+        effects.stroke = Some(StrokeEffect { size: 8.0, ..StrokeEffect::default() });
+        effects.shadow = Some(ShadowEffect { distance: 12.0, ..ShadowEffect::default() });
+        session.set_effects(effects, Some(id), "Layer Effects");
+        assert_eq!(session.history.undo_name(), "Layer Effects");
+
+        session.select_effect(LayerEffectKind::Stroke, id, true);
+        session.change_effects(|effects| effects.stroke.as_mut().expect("the stroke").size = 24.0);
+        assert_eq!(session.history.undo_name(), "Edit Stroke");
+        session.finish_effects_editing(false);
+        let restored = effects_of(&session, id);
+        assert_eq!(restored.stroke.expect("the stroke").size, 8.0, "the panel's effect comes back");
+        assert_eq!(restored.shadow.expect("the shadow").distance, 12.0, "the other effect is untouched");
+        assert_eq!(session.history.undo_name(), "Cancel Stroke");
+    }
+
+    #[test]
+    fn set_effects_refuses_an_invalid_payload_and_a_second_identical_write() {
+        let (mut session, id) = session_with_layer();
+        let mut invalid = LayerEffects::default();
+        invalid.stroke = Some(StrokeEffect { opacity: 2.0, ..StrokeEffect::default() });
+        session.set_effects(invalid, Some(id), "Layer Effects");
+        assert!(effects_of(&session, id).is_empty(), "an out-of-range effect is refused");
+        assert!(!session.history.can_undo(), "nothing was recorded");
+
+        let mut effects = LayerEffects::default();
+        effects.stroke = Some(StrokeEffect::default());
+        session.set_effects(effects.clone(), Some(id), "Layer Effects");
+        let steps = session.history.undo_count();
+        session.set_effects(effects, Some(id), "Layer Effects");
+        assert_eq!(session.history.undo_count(), steps, "an identical write is not an undo step");
+    }
+
+    #[test]
+    fn effects_need_a_layer_with_pixels() {
+        let (mut session, id) = session_with_layer();
+        session.document.as_mut().expect("a document").layers[0].asset = None;
+        assert!(!session.can_edit_effects());
+        session.add_effect(LayerEffectKind::Stroke);
+        assert!(effects_of(&session, id).is_empty());
+        assert_eq!(session.history.undo_count(), 0);
+    }
+
+    #[test]
+    fn toggling_copying_and_removing_record_the_swift_names() {
+        let (mut session, id) = session_with_layer();
+        let other = image_layer("Other");
+        let other_id = other.id;
+        session.document.as_mut().expect("a document").layers.push(other);
+        let mut effects = LayerEffects::default();
+        effects.stroke = Some(StrokeEffect { size: 5.0, ..StrokeEffect::default() });
+        session.set_effects(effects, Some(id), "Layer Effects");
+
+        session.toggle_effect(LayerEffectKind::Stroke, id);
+        assert_eq!(session.history.undo_name(), "Hide Stroke");
+        assert!(!effects_of(&session, id).is_enabled(LayerEffectKind::Stroke));
+        session.toggle_effect(LayerEffectKind::Stroke, id);
+        assert_eq!(session.history.undo_name(), "Show Stroke");
+
+        assert!(session.can_copy_effect(LayerEffectKind::Stroke, id, other_id));
+        session.copy_effect(LayerEffectKind::Stroke, id, other_id);
+        assert_eq!(session.history.undo_name(), "Copy Stroke");
+        assert_eq!(effects_of(&session, other_id).stroke.expect("the copy").size, 5.0);
+
+        session.select_effect(LayerEffectKind::Stroke, other_id, false);
+        session.remove_selected_effect();
+        assert_eq!(session.history.undo_name(), "Remove Stroke");
+        assert!(effects_of(&session, other_id).is_empty());
+        assert!(session.effect_selection.is_none());
+
+        // A folder cannot receive an effect, and a layer cannot copy onto itself.
+        assert!(!session.can_copy_effect(LayerEffectKind::Stroke, id, id));
+        session.document.as_mut().expect("a document").layers[1].is_group = true;
+        assert!(!session.can_copy_effect(LayerEffectKind::Stroke, id, other_id));
+    }
+
+    #[test]
+    fn a_panel_edit_stays_bound_to_the_layer_that_opened_it() {
+        let (mut session, id) = session_with_layer();
+        session.add_effect(LayerEffectKind::Shadow);
+        // The selection moves to another layer; the panel still edits the first one.
+        let other = image_layer("Other");
+        let other_id = other.id;
+        session.document.as_mut().expect("a document").layers.push(other);
+        session.set_active_layer(Some(other_id));
+        session.change_effects(|effects| effects.shadow.as_mut().expect("the shadow").distance = 33.0);
+        assert_eq!(effects_of(&session, id).shadow.expect("the shadow").distance, 33.0);
+        assert!(effects_of(&session, other_id).is_empty());
     }
 }

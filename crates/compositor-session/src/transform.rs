@@ -6,8 +6,9 @@
 //! `cancelTransform`, `nudgeLayer`, and the state they read: `canTransform`, `transformsAsGroup`,
 //! `groupTransformMembers`, `groupTransformBox`, `transformPixelSize`, `displayedTransform`,
 //! `transformTargetsMask`, `editedTransform`, `pendingTransform`), the session extension of
-//! `Document/Distort.swift` (`beginDistort`, `previewCorners`, `distortShape`, `commitDistort` and
-//! the pixel resample they commit with) and `Document/LayerMask.swift`'s `commitMaskTransform` and
+//! `Document/Distort.swift` (`beginDistort`, `previewCorners`, `distortShape`, `distortedEffects`,
+//! `distortPreview`, `commitDistort` and the pixel resample they commit with) and
+//! `Document/LayerMask.swift`'s `commitMaskTransform` and
 //! `displayedMaskPlacement`. `Rendering/TransformOverlay.swift`'s geometry, its hit-testing and the
 //! direction maths behind the handle cursors are here too — the drawing itself belongs to the UI.
 //!
@@ -18,12 +19,14 @@
 //! has no equivalent: the commands here are synchronous, and the view reads the state it used to
 //! await (`is_project_busy`, `shows_busy`, `can_undo`) as `docs/PORTING.md` §4 lays out.
 //!
-//! Not ported here yet, because the render side of them has not landed: `distortedEffects` and
-//! `distortPreview` (the other functions of `Distort.swift`'s session extension; `maskDistortPreview`
-//! is `mask_ops.rs`'s). The first needs `LayerEffectsRenderer.placed` (`core::layer_effects`), and
-//! both need `LayerMask.clipImage` (`core::layer_mask`). `commit_distort` therefore keeps the pixels
-//! path only; the effects preview it used to seed is left out with them.
+//! The two previews `Distort.swift` leaves to the canvas — `distortedEffects` and `distortPreview`
+//! — keep their warps in the session's [`DistortPreviewCache`] and [`DistortEffectsCache`], so
+//! moving one corner does not redo a warp the last one already made; `commitDistort` seeds the
+//! effects preview it warped with, so a layer's stroke and shadow do not blink off for a frame on
+//! Apply while the worker renders the new pixels' effects. (`maskDistortPreview`, the mask's own
+//! counterpart, is `mask_ops.rs`'s.)
 
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_4, PI};
 use std::sync::Arc;
 
@@ -38,7 +41,9 @@ use compositor_core::viewport::CanvasViewport;
 use compositor_core::CoreError;
 use compositor_core::Id;
 use compositor_pixels::adjustments::PixelAdjust;
+use compositor_pixels::effects::LayerEffectsRenderer;
 use compositor_pixels::warp::DistortWarp;
+use compositor_render::live_mask_renderer::MaskClip;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::session::EditorSession;
@@ -48,7 +53,7 @@ use crate::session::EditorSession;
 #[derive(Clone, Debug, PartialEq)]
 pub struct TransformDuplicate {
     pub copies: Vec<Id>,
-    pub source: FxHashSet<Id>,
+    pub source: HashSet<Id>,
     pub primary: Option<Id>,
 }
 
@@ -243,9 +248,19 @@ fn same_image(left: &PixelImage, right: &PixelImage) -> bool {
     }
 }
 
+/// The same identity for the optional images the Swift compared with `===` (`cache.mask === mask`):
+/// both absent, or one shared raster on each side.
+fn same_optional_image(left: &Option<PixelImage>, right: &Option<PixelImage>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_image(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// `LayerMask.background(of:)` over the pixel type a mask's thumbnail carries; white when it is not
 /// the gray raster a mask is meant to hold.
-fn mask_background(thumbnail: &PixelImage) -> f64 {
+pub(crate) fn mask_background(thumbnail: &PixelImage) -> f64 {
     thumbnail.as_gray().map_or(1.0, LayerMask::background)
 }
 
@@ -445,7 +460,7 @@ impl EditorSession {
         self.tool = NavigationTool::Move;
         if self.transforms_as_group() {
             let Some(box_) = self.group_transform_box() else { return };
-            let mut originals = FxHashMap::default();
+            let mut originals = HashMap::new();
             for id in self.group_transform_members() {
                 if let Some(member) = self
                     .document
@@ -743,6 +758,172 @@ impl EditorSession {
         }
     }
 
+    /// The layer warped into the pending distortion, at preview size, for the canvas to draw.
+    /// A layer's effects, warped into the shape a distortion in progress is making — so its stroke
+    /// and shadow stay on while the corners are dragged, rather than disappearing until the
+    /// distortion is applied. `image` is the layer with its effects around it (see
+    /// [`LayerEffectsRenderer`]), which already includes its mask.
+    /// (`distortedEffects(for:effects:inset:)`.)
+    pub fn distorted_effects(
+        &mut self,
+        layer: &ImageLayer,
+        image: &PixelImage,
+        inset: f64,
+    ) -> Option<(PixelImage, LayerTransform)> {
+        let target = {
+            let edit = self.transform_edit.as_ref()?;
+            if edit.mask {
+                return None;
+            }
+            let shape = edit.corners.as_ref()?;
+            self.distort_target(layer.id, edit, shape)?
+        };
+        self.distorted_effects_target(layer.id, image, inset, (target.0, &target.1))
+    }
+
+    /// The same, for a distortion whose target is already known — the commit, which runs once the
+    /// edit is over. (`distortedEffects(for:effects:inset:target:)`.)
+    fn distorted_effects_target(
+        &mut self,
+        layer_id: Id,
+        image: &PixelImage,
+        inset: f64,
+        target: (LayerTransform, &[Point]),
+    ) -> Option<(PixelImage, LayerTransform)> {
+        let (transform, corners) = target;
+        // The effects image is the layer's box grown by its margin; its corners take the same
+        // perspective. An effects raster is RGBA — the kind `LayerEffectsRenderer` renders.
+        let grown = LayerEffectsRenderer::placed(&transform, image.as_rgba()?, inset);
+        let carried = DistortWarp::carried(&grown, &transform, corners).to_vec();
+        if let Some(cache) = self.distort_effects_cache.get(&layer_id) {
+            if cache.corners == carried && same_image(&cache.image, image) {
+                return cache.result.clone();
+            }
+        }
+        let result = DistortWarp::warp(image, &grown, &carried, false, Some(2048.0)).ok();
+        self.distort_effects_cache.insert(
+            layer_id,
+            DistortEffectsCache {
+                corners: carried,
+                image: image.clone(),
+                result: result.clone(),
+            },
+        );
+        result
+    }
+
+    /// The layer warped into the pending distortion, at preview size, for the canvas to draw —
+    /// its mask warped with it. (`distortPreview(for:)`.)
+    pub fn distort_preview(
+        &mut self,
+        layer: &ImageLayer,
+    ) -> Option<(PixelImage, Option<PixelImage>, LayerTransform)> {
+        let (image, transform, corners) = {
+            let edit = self.transform_edit.as_ref()?;
+            if edit.mask {
+                return None;
+            }
+            let shape = edit.corners.as_ref()?;
+            let image = layer.asset.as_ref()?.image.clone();
+            let (transform, corners) = self.distort_target(layer.id, edit, shape)?;
+            (image, transform, corners)
+        };
+        let mask = layer.mask.as_ref().and_then(LayerMask::enabled_image).cloned();
+        if let Some(cache) = self.distort_preview_cache.get(&layer.id) {
+            if cache.corners == corners
+                && cache.draft == transform
+                && same_image(&cache.image, &image)
+                && same_optional_image(&cache.mask, &mask)
+            {
+                return cache.result.clone();
+            }
+        }
+        let mut result = None;
+        if let Ok((warped, warped_transform)) =
+            DistortWarp::warp(&image, &transform, &corners, false, Some(2048.0))
+        {
+            let owned = layer.mask.as_ref();
+            let width = warped.width();
+            let height = warped.height();
+            let covers_layer = owned.map_or(true, |mask| mask.placement.is_none() && mask.is_linked);
+            let warped_mask = if covers_layer {
+                // A mask covering the layer warps like its pixels; no mask at all leaves none.
+                mask.as_ref().and_then(|mask| {
+                    DistortWarp::warp(mask, &transform, &corners, true, Some(2048.0))
+                        .ok()
+                        .map(|(image, _)| image)
+                })
+            } else {
+                // A linked mask placed apart takes the same perspective over its own bounds; its
+                // warp failing (or the shape not being one a perspective can take) leaves the
+                // mask where it is, as the Swift's `else if` falls through.
+                let placed_apart = owned.and_then(|owned| {
+                    if !owned.is_linked {
+                        return None;
+                    }
+                    let placed = owned.placement?;
+                    let placement = placed.following(layer.transform, transform);
+                    let carried = DistortWarp::carried(&placement, &transform, &corners);
+                    if !DistortWarp::is_convex(&carried) {
+                        return None;
+                    }
+                    let (moved_image, moved_transform) = DistortWarp::warp_mask(
+                        &owned.asset.image,
+                        &placement,
+                        &carried,
+                        mask_background(&owned.asset.thumbnail),
+                        Some(2048.0),
+                    )
+                    .ok()?;
+                    let moved = LayerMask {
+                        asset: ImportedImage::new(
+                            moved_image,
+                            owned.asset.thumbnail.clone(),
+                            owned.asset.name.clone(),
+                        ),
+                        is_enabled: owned.is_enabled,
+                        placement: None,
+                        is_linked: true,
+                    };
+                    Some(moved.clip_image(
+                        Some(&moved_transform),
+                        &warped_transform,
+                        width,
+                        height,
+                        Some(2048.0),
+                    ))
+                });
+                if let Some(clip) = placed_apart {
+                    clip
+                } else {
+                    // An unlinked mask stays where it is on the document.
+                    owned.and_then(|owned| {
+                        let placement = owned.placement.unwrap_or(layer.transform);
+                        owned.clip_image(
+                            Some(&placement),
+                            &warped_transform,
+                            width,
+                            height,
+                            Some(2048.0),
+                        )
+                    })
+                }
+            };
+            result = Some((warped, warped_mask, warped_transform));
+        }
+        self.distort_preview_cache.insert(
+            layer.id,
+            DistortPreviewCache {
+                corners,
+                draft: transform,
+                image,
+                mask,
+                result: result.clone(),
+            },
+        );
+        result
+    }
+
     /// Apply for a distortion: each distorted layer's pixels and mask are resampled into its shape,
     /// as one undo step.
     pub fn commit_distort(&mut self, edit: &TransformEdit, shape: &[Point]) {
@@ -761,10 +942,24 @@ impl EditorSession {
             let Some((transform, corners)) = self.distort_target(id, edit, shape) else {
                 continue;
             };
-            // The Swift also seeds the layer's effects preview with the effects warped for this
-            // distortion (see the module note), so they do not blink off for a frame on Apply.
+            // The effects warped for this distortion are already in hand: keep showing them until
+            // the worker has rendered the effects for the layer's new pixels, or they blink off
+            // for a frame on Apply.
+            let rendered = self.effects_previews.rendered(id);
+            let warped_effects = rendered.and_then(|(image, inset, _)| {
+                self.distorted_effects_target(id, &PixelImage::Rgba(image), inset, (transform, &corners))
+            });
             if let Err(error) = self.distort_at(index, transform, &corners) {
                 self.brush_error = Some(error.to_string());
+            }
+            // Placed where it was warped to: applying a distortion also crops the layer, so the
+            // margins around it are no longer even and an inset could not put it back in the
+            // right place.
+            if let Some((image, placement)) = warped_effects {
+                // The effects warp renders RGBA (`is_mask: false`), the only kind the seed takes.
+                if let PixelImage::Rgba(image) = image {
+                    self.effects_previews.seed(id, image, placement);
+                }
             }
         }
         self.end_edit();
@@ -822,7 +1017,7 @@ impl EditorSession {
                         let mask_asset = if same_image(&moved_image, &original.asset.image) {
                             original.asset.clone()
                         } else {
-                            LayerMask::asset(cropped)?
+                            LayerMask::asset(moved_image)?
                         };
                         mask_change = Some(MaskChange::Replace(LayerMask {
                             asset: mask_asset,
@@ -998,6 +1193,8 @@ impl EditorSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compositor_core::buffer::{Gray8Image, Rgba8Image, SharedImage};
+    use compositor_core::document::CanvasDocument;
     use compositor_core::geom::Rect;
     use compositor_core::layer_transform::TransformSnap;
 
@@ -1069,14 +1266,213 @@ mod tests {
         }
     }
 
+    // MARK: Distortion previews
+
+    /// The corners a distortion is dragged to: a usable, convex quad.
+    fn dragged_corners() -> [Point; 4] {
+        [
+            Point::new(10.0, 10.0),
+            Point::new(60.0, 10.0),
+            Point::new(30.0, 30.0),
+            Point::new(10.0, 30.0),
+        ]
+    }
+
+    /// The same distortion somewhere else — another shape, so every warp keyed on it misses.
+    fn moved_corners() -> [Point; 4] {
+        [
+            Point::new(8.0, 6.0),
+            Point::new(70.0, 12.0),
+            Point::new(52.0, 36.0),
+            Point::new(10.0, 30.0),
+        ]
+    }
+
+    /// A session with one pixel layer mid-distortion, and that layer as it was before the edit.
+    fn distort_session(image: PixelImage) -> (EditorSession, ImageLayer) {
+        let layer = ImageLayer::from_asset(
+            ImportedImage::new(image.clone(), image, "Layer 1"),
+            Point::new(10.0, 10.0),
+        );
+        let mut document = CanvasDocument::new(100, 60);
+        document.layers = vec![layer.clone()];
+        let mut session = EditorSession::default();
+        session.document = Some(document);
+        session.set_active_layer(Some(layer.id));
+        session.begin_transform(false);
+        session.begin_distort();
+        session.preview_corners(&dragged_corners());
+        (session, layer)
+    }
+
+    #[test]
+    fn distorted_effects_reuses_a_warp_while_its_corners_and_image_stand() {
+        let image = PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8)));
+        let (mut session, layer) = distort_session(image.clone());
+        let first = session
+            .distorted_effects(&layer, &image, 2.0)
+            .expect("a warped effects preview");
+        let again = session
+            .distorted_effects(&layer, &image, 2.0)
+            .expect("a warped effects preview");
+        assert!(same_image(&first.0, &again.0), "unchanged corners reuse the warp");
+
+        // The corners move: a fresh warp.
+        session.preview_corners(&moved_corners());
+        let moved = session
+            .distorted_effects(&layer, &image, 2.0)
+            .expect("a warped effects preview");
+        assert!(!same_image(&first.0, &moved.0), "changed corners warp again");
+
+        // The same pixels under another raster are another image, as the Swift's `===` saw them.
+        let other = PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8)));
+        let restamped = session
+            .distorted_effects(&layer, &other, 2.0)
+            .expect("a warped effects preview");
+        assert!(
+            !same_image(&moved.0, &restamped.0),
+            "a different raster warps again"
+        );
+    }
+
+    #[test]
+    fn distort_preview_reuses_a_warp_until_one_of_its_keys_changes() {
+        let image = PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8)));
+        let (mut session, layer) = distort_session(image.clone());
+        let first = session.distort_preview(&layer).expect("a warped preview");
+        assert!(first.1.is_none(), "an unmasked layer previews without a mask");
+        let again = session.distort_preview(&layer).expect("a warped preview");
+        assert!(same_image(&first.0, &again.0), "unchanged corners reuse the warp");
+
+        // The corners are part of the key.
+        session.preview_corners(&moved_corners());
+        let moved = session.distort_preview(&layer).expect("a warped preview");
+        assert!(!same_image(&first.0, &moved.0), "changed corners warp again");
+
+        // So are the layer's pixels: equal content under another raster is another image.
+        let mut other_layer = layer.clone();
+        other_layer.asset = Some(ImportedImage::new(
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8))),
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8))),
+            "Layer 1",
+        ));
+        let restamped = session
+            .distort_preview(&other_layer)
+            .expect("a warped preview");
+        assert!(!same_image(&moved.0, &restamped.0), "a different raster warps again");
+
+        // And so is the mask: the same layer and corners with a mask to warp along is a miss.
+        let mut masked_layer = other_layer.clone();
+        masked_layer.mask = Some(LayerMask::new(ImportedImage::new(
+            PixelImage::Gray(Arc::new(Gray8Image::uniform(8, 8, 255))),
+            PixelImage::Gray(Arc::new(Gray8Image::uniform(8, 8, 255))),
+            "Mask",
+        )));
+        let masked = session
+            .distort_preview(&masked_layer)
+            .expect("a warped preview");
+        assert!(masked.1.is_some(), "a mask covering the layer warps with it");
+        assert!(!same_image(&restamped.0, &masked.0), "a new mask warps again");
+    }
+
+    #[test]
+    fn a_mask_that_covers_or_leaves_the_layer_still_comes_back() {
+        let image = PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8)));
+        let (mut session, layer) = distort_session(image);
+
+        // Unlinked: the mask stays where it is on the document and is clipped into the warp's grid.
+        let mut unlinked = layer.clone();
+        let mut unlinked_mask = LayerMask::new(ImportedImage::new(
+            PixelImage::Gray(Arc::new(Gray8Image::uniform(8, 8, 255))),
+            PixelImage::Gray(Arc::new(Gray8Image::uniform(8, 8, 255))),
+            "Mask",
+        ));
+        unlinked_mask.is_linked = false;
+        unlinked.mask = Some(unlinked_mask);
+        let preview = session.distort_preview(&unlinked).expect("a warped preview");
+        assert!(preview.1.is_some(), "an unlinked mask is still drawn");
+
+        // Linked and placed apart: it takes the perspective over its own bounds, or falls back to
+        // the same clip an unlinked mask gets when that shape cannot be warped.
+        session.distort_preview_cache.clear();
+        let mut placed = layer.clone();
+        let mut placed_mask = LayerMask::new(ImportedImage::new(
+            PixelImage::Gray(Arc::new(Gray8Image::uniform(6, 6, 128))),
+            PixelImage::Gray(Arc::new(Gray8Image::uniform(6, 6, 128))),
+            "Mask",
+        ));
+        placed_mask.placement = Some(box_(12.0, 12.0, 4.0, 4.0));
+        placed.mask = Some(placed_mask);
+        let preview = session.distort_preview(&placed).expect("a warped preview");
+        assert!(preview.1.is_some(), "a linked mask placed apart is drawn too");
+    }
+
+    #[test]
+    fn the_distort_previews_refuse_what_they_do_not_draw() {
+        let image = PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8)));
+        let (mut session, layer) = distort_session(image.clone());
+
+        // A layer without pixels has nothing to preview; the effects preview never reads them.
+        let mut bare = layer.clone();
+        bare.asset = None;
+        assert!(session.distort_preview(&bare).is_none());
+
+        // Without a distortion in progress there is nothing to warp.
+        session.transform_edit = None;
+        assert!(session.distorted_effects(&layer, &image, 0.0).is_none());
+        assert!(session.distort_preview(&layer).is_none());
+
+        // A mask edit distorts the mask itself (`maskDistortPreview` in `mask_ops.rs`), not the layer.
+        let mut mask_edit = TransformEdit::new(layer.id, layer.transform, true);
+        mask_edit.mask = true;
+        mask_edit.corners = Some(dragged_corners().to_vec());
+        session.transform_edit = Some(mask_edit);
+        assert!(session.distorted_effects(&layer, &image, 0.0).is_none());
+        assert!(session.distort_preview(&layer).is_none());
+    }
+
+    #[test]
+    fn commit_distort_seeds_the_effects_preview_it_warped_and_clears_the_caches() {
+        let image = PixelImage::Rgba(Arc::new(Rgba8Image::new(8, 8)));
+        let (mut session, layer) = distort_session(image.clone());
+        let effects: SharedImage = Arc::new(Rgba8Image::new(12, 12));
+        session
+            .effects_previews
+            .seed(layer.id, effects.clone(), layer.transform);
+        // Drawing once fills the preview cache the commit then drops.
+        session.distort_preview(&layer).expect("a warped preview");
+        let edit = session.transform_edit.clone().expect("a distortion edit");
+        let corners = edit.corners.clone().expect("corners");
+        session.commit_distort(&edit, &corners);
+
+        let (seeded, inset, placement) = session
+            .effects_previews
+            .rendered(layer.id)
+            .expect("the effects preview stays");
+        assert!(
+            !Arc::ptr_eq(&seeded, &effects),
+            "the warped effects are seeded, not the originals"
+        );
+        assert_eq!(inset, 0.0, "a seed needs no inset of its own");
+        assert!(placement.is_some(), "placed where they were warped to");
+        assert!(
+            session.distort_preview_cache.is_empty(),
+            "the commit drops the preview cache"
+        );
+        assert!(
+            session.distort_effects_cache.is_empty(),
+            "and the effects cache with it"
+        );
+    }
+
     // MARK: Group transforms
 
     #[test]
     fn a_group_member_follows_a_plain_box_move_exactly() {
-        let box_ = box_(10.0, 20.0, 100.0, 50.0);
+        let base = box_(10.0, 20.0, 100.0, 50.0);
         let draft = box_(40.0, 15.0, 100.0, 50.0);
         let member = box_(20.0, 30.0, 40.0, 20.0);
-        let moved = member.following(box_, draft);
+        let moved = member.following(base, draft);
         assert_eq!(moved.origin, Point::new(50.0, 25.0));
         assert_eq!(moved.size, member.size);
         assert_eq!(moved.rotation, member.rotation);
@@ -1086,11 +1482,11 @@ mod tests {
 
     #[test]
     fn a_group_member_follows_a_box_resize_about_the_box() {
-        let box_ = box_(0.0, 0.0, 100.0, 100.0);
+        let base = box_(0.0, 0.0, 100.0, 100.0);
         // Twice the size about the same center (50, 50).
         let draft = box_(-50.0, -50.0, 200.0, 200.0);
         let member = box_(50.0, 50.0, 20.0, 20.0);
-        let moved = member.following(box_, draft);
+        let moved = member.following(base, draft);
         // The member's center sits 60% into the box, which a doubled box puts at 70%.
         let center = moved.center();
         assert!((center.x - 70.0).abs() < 1e-9, "center x was {center:?}");
@@ -1101,9 +1497,9 @@ mod tests {
 
     #[test]
     fn an_untouched_box_leaves_every_member_where_it_is() {
-        let box_ = box_(10.0, 20.0, 100.0, 50.0);
+        let base = box_(10.0, 20.0, 100.0, 50.0);
         let member = box_(20.0, 30.0, 40.0, 20.0);
-        assert_eq!(member.following(box_, box_), member);
+        assert_eq!(member.following(base, base), member);
     }
 
     // MARK: Snapping
@@ -1201,9 +1597,11 @@ mod tests {
 
     #[test]
     fn the_handle_cursor_direction_follows_the_box_angle() {
-        let geometry = TransformOverlayGeometry::new(&box_(0.0, 0.0, 100.0, 100.0), &viewport(), Size::new(100.0, 100.0));
-        // A square box runs at 45°: the corner handle rounds to the third position, the left edge's to
-        // the first, the top edge's to the fourth.
+        // A square box runs at 45°: the top-left corner rounds to the third position, the top edge's
+        // to the fourth, the right edge's to the second, the top-right corner's to the first.
+        let mut rotated = box_(0.0, 0.0, 100.0, 100.0);
+        rotated.rotation = 45.0;
+        let geometry = TransformOverlayGeometry::new(&rotated, &viewport(), Size::new(100.0, 100.0));
         assert_eq!(geometry.resize_direction(0), ResizeDirection::Bottom);
         assert_eq!(geometry.resize_direction(1), ResizeDirection::TopRight);
         assert_eq!(geometry.resize_direction(3), ResizeDirection::BottomRight);

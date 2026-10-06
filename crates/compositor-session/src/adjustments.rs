@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use compositor_core::document::ImageLayer;
+use compositor_core::document::{ImageLayer, ProjectSnapshot};
 use compositor_core::geom::Point;
 use compositor_core::image_ops::FilterSettings;
 use compositor_core::imported_image::ImportedImage;
@@ -26,7 +26,7 @@ use compositor_core::layer_adjustment::{AdjustmentColor, AdjustmentKind, Gradien
 use compositor_core::Id;
 
 use crate::filters::{FilterEdit, HueSaturationEdit, LevelsEdit};
-use crate::projects::{ProjectSnapshot, SessionHost};
+use crate::projects::SessionHost;
 use crate::EditorSession;
 
 impl EditorSession {
@@ -48,7 +48,7 @@ impl EditorSession {
         // Grain layer gets a pattern of its own.
         if kind == AdjustmentKind::GradientMap {
             adjustment.gradient_map_settings = Some(GradientMapSettings {
-                shadows: AdjustmentColor::from(self.foreground_color),
+                shadows: AdjustmentColor::from(self.foreground_color()),
                 highlights: AdjustmentColor::from(self.background_color),
                 ..GradientMapSettings::default()
             });
@@ -72,7 +72,7 @@ impl EditorSession {
         let index = self
             .document
             .as_ref()
-            .and_then(|document| document.layers.iter().position(|layer| layer.id == self.active_layer_id))
+            .and_then(|document| document.layers.iter().position(|layer| Some(layer.id) == self.active_layer_id))
             .map(|index| index + 1)
             .unwrap_or_else(|| self.document.as_ref().map_or(0, |document| document.layers.len()));
         let layer_id = layer.id;
@@ -211,8 +211,9 @@ impl EditorSession {
                 self.filter_edit = Some(edit);
             }
         }
+        let name = format!("Edit {} Adjustment", original.kind.raw_value());
         self.adjustment_original = Some(original);
-        self.begin_edit(&format!("Edit {} Adjustment", original.kind.raw_value()));
+        self.begin_edit(&name);
         true
     }
 
@@ -314,9 +315,184 @@ fn random_seed() -> u32 {
         .map(|elapsed| elapsed.as_nanos() as u64)
         .unwrap_or(0);
     let mut z = now
-        .wrapping_add(std::process::id().wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add((std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
         .wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed) as u64);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     (z ^ (z >> 31)) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compositor_core::buffer::Rgba8Image;
+    use compositor_core::color::PaletteColor;
+    use compositor_core::document::CanvasDocument;
+    use compositor_core::geom::Point;
+    use compositor_core::imported_image::PixelImage;
+    use compositor_core::layer_adjustment::LevelsSettings;
+    use std::sync::Arc;
+
+    /// A host with no services: the guard paths under test never reach for one.
+    struct NoHost;
+    impl SessionHost for NoHost {}
+
+    /// A host that renders the flattened document the adjustment dialog samples from
+    /// (`ImageExporter.shared.render(source)` upstream), from plain blank pixels.
+    struct RenderHost;
+    impl SessionHost for RenderHost {
+        fn render(&self, _snapshot: &ProjectSnapshot) -> Result<compositor_core::raster::RasterSnapshot, String> {
+            let image = PixelImage::Rgba(Arc::new(Rgba8Image::new(64, 64)));
+            Ok(compositor_core::raster::RasterSnapshot::new(
+                64,
+                64,
+                Some(image),
+                compositor_core::geom::Rect::new(0.0, 0.0, 64.0, 64.0),
+                Vec::new(),
+                false,
+                None,
+            ))
+        }
+    }
+
+    fn session_with_layer() -> (EditorSession, Id) {
+        let mut session = EditorSession::default();
+        let asset = ImportedImage::new(
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(16, 16))),
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(4, 4))),
+            "Imported",
+        );
+        let layer = ImageLayer::from_asset(asset, Point::ZERO);
+        let id = layer.id;
+        let mut document = CanvasDocument::new(64, 64);
+        document.layers.push(layer);
+        session.document = Some(document);
+        session.set_active_layer(Some(id));
+        (session, id)
+    }
+
+    fn adjustment_of(session: &EditorSession, id: Id) -> Option<LayerAdjustment> {
+        session
+            .document
+            .as_ref()
+            .and_then(|document| document.layers.iter().find(|layer| layer.id == id))
+            .and_then(|layer| layer.adjustment.clone())
+    }
+
+    #[test]
+    fn adding_an_adjustment_inserts_it_above_the_active_layer_and_opens_its_dialog() {
+        let (mut session, id) = session_with_layer();
+        session.add_adjustment(AdjustmentKind::Levels);
+        let document = session.document.as_ref().expect("a document");
+        assert_eq!(document.layers.len(), 2);
+        let added = document.layers[1].id;
+        assert_eq!(document.layers[1].name, "Levels", "the layer takes the kind's own name");
+        assert_eq!(document.layers[1].adjustment.as_ref().map(|value| value.kind), Some(AdjustmentKind::Levels));
+        assert_eq!(session.active_layer_id, Some(added));
+        assert_eq!(session.history.undo_name(), "New Levels Adjustment");
+        assert_eq!(session.adjustment_editing_id, Some(added));
+
+        // A second adjustment goes above the one just added. `canEditLayers` refuses while a dialog
+        // is wanted (`adjustmentEditingID == nil`, EditorSession.swift:644), so the panel is put
+        // away first, exactly as the upstream tests do (AdjustmentLayerTests.swift:21-24).
+        session.adjustment_editing_id = None;
+        session.add_adjustment(AdjustmentKind::Curves);
+        assert_eq!(session.document.as_ref().expect("a document").layers.len(), 3);
+        assert_eq!(session.history.undo_name(), "New Curves Adjustment");
+        assert!(adjustment_of(&session, id).is_none(), "the image layer keeps its pixels");
+    }
+
+    #[test]
+    fn invert_has_nothing_to_set_and_opens_no_dialog() {
+        let (mut session, _) = session_with_layer();
+        session.add_adjustment(AdjustmentKind::Invert);
+        assert_eq!(session.history.undo_name(), "New Invert Adjustment");
+        assert!(session.adjustment_editing_id.is_none(), "nothing to set, so no editor opens");
+    }
+
+    #[test]
+    fn a_gradient_map_runs_from_the_foreground_to_the_background_color() {
+        let (mut session, _) = session_with_layer();
+        session.set_foreground_color(PaletteColor::BLACK);
+        session.background_color = PaletteColor::WHITE;
+        session.add_adjustment(AdjustmentKind::GradientMap);
+        let layer_id = session.document.as_ref().expect("a document").layers[1].id;
+        let settings = adjustment_of(&session, layer_id)
+            .expect("the adjustment")
+            .gradient_map_settings
+            .expect("a new Gradient Map carries its ends");
+        assert_eq!((settings.shadows.red, settings.shadows.green, settings.shadows.blue), (0.0, 0.0, 0.0));
+        assert_eq!((settings.highlights.red, settings.highlights.green, settings.highlights.blue), (1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn each_grain_and_noise_layer_gets_a_pattern_of_its_own() {
+        let (mut session, _) = session_with_layer();
+        session.add_adjustment(AdjustmentKind::Grain);
+        let first = session.document.as_ref().expect("a document").layers[1].id;
+        // The panel is closed before the next add, as `newAdjustmentLayersStartFromThePaletteRender
+        // AndEditInThePanel` does (ImageAdjustmentTests.swift:149): `canEditLayers` needs a free
+        // dialog slot.
+        session.adjustment_editing_id = None;
+        session.add_adjustment(AdjustmentKind::Grain);
+        let second = session.document.as_ref().expect("a document").layers[2].id;
+        let first_seed = adjustment_of(&session, first).expect("a grain").grain_settings.expect("settings").seed;
+        let second_seed = adjustment_of(&session, second).expect("a grain").grain_settings.expect("settings").seed;
+        assert_ne!(first_seed, second_seed, "every Grain layer gets a pattern of its own");
+
+        session.adjustment_editing_id = None;
+        session.add_adjustment(AdjustmentKind::AddNoise);
+        let noise = session.document.as_ref().expect("a document").layers[3].id;
+        assert!(adjustment_of(&session, noise).expect("add noise").noise_seed.is_some());
+    }
+
+    #[test]
+    fn update_adjustment_takes_a_valid_value_and_refuses_an_invalid_one() {
+        let (mut session, _) = session_with_layer();
+        session.add_adjustment(AdjustmentKind::GaussianBlur);
+        let layer_id = session.document.as_ref().expect("a document").layers[1].id;
+        let valid = LayerAdjustment::new(AdjustmentKind::GaussianBlur);
+        session.update_adjustment(layer_id, valid.clone());
+        assert_eq!(adjustment_of(&session, layer_id).map(|value| value.kind), Some(AdjustmentKind::GaussianBlur));
+
+        let mut invalid = valid;
+        invalid.blur_radius = Some(500.0);
+        session.update_adjustment(layer_id, invalid);
+        // A fresh record stores no radius at all: `gaussianRadius` resolves `blurRadius ?? 10`
+        // (LayerAdjustment.swift:92-95) and validity is judged on that resolved value (:137), so
+        // the refused 500 leaves the resolved radius at the default 10.
+        assert_eq!(adjustment_of(&session, layer_id).expect("the valid value stays").gaussian_radius(), 10.0, "an out-of-range value is refused");
+    }
+
+    #[test]
+    fn cancelling_the_dialog_puts_the_original_adjustment_back() {
+        let (mut session, _) = session_with_layer();
+        session.add_adjustment(AdjustmentKind::Levels);
+        let layer_id = session.adjustment_editing_id.expect("the dialog opened");
+
+        // Before `beginAdjustmentEditing` the dialog is only wanted: no original is captured yet,
+        // so there is nothing to read back and nothing to preview (AdjustmentEditing.swift:101-105).
+        assert!(!session.preview_adjustment_editing(true), "nothing to preview before the editor opens");
+
+        // The original is captured by `beginAdjustmentEditing` after the render
+        // (AdjustmentEditing.swift:7,58), which opens the Levels editor on the way.
+        assert!(session.begin_adjustment_editing(layer_id, &RenderHost), "the editor opens");
+        let original = session.adjustment_original.clone().expect("the original value");
+        let mut edited = original.clone();
+        edited.levels = LevelsSettings::default();
+        session.update_adjustment(layer_id, edited);
+
+        assert!(session.finish_adjustment_editing(false));
+        assert_eq!(adjustment_of(&session, layer_id), Some(original), "Cancel restores the settings");
+        assert!(session.adjustment_editing_id.is_none());
+        assert!(session.adjustment_original.is_none());
+    }
+
+    #[test]
+    fn a_dialog_needs_an_adjustment_layer_that_exists() {
+        let (mut session, id) = session_with_layer();
+        session.adjustment_editing_id = Some(id);
+        assert!(!session.begin_adjustment_editing(id, &NoHost), "an image layer has no adjustment to edit");
+        assert!(session.adjustment_original.is_none());
+    }
 }

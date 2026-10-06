@@ -133,6 +133,16 @@ pub enum ImportAwait {
     PsdConversions { answer: Option<bool>, imported: Box<PhotoshopImport> },
 }
 
+impl ImportAwait {
+    /// True while the sheet has not answered yet: the drain waits, and a later poll continues.
+    pub fn is_unanswered(&self) -> bool {
+        match self {
+            Self::RawDevelop { settings, .. } => settings.is_none(),
+            Self::PsdConversions { answer, .. } => answer.is_none(),
+        }
+    }
+}
+
 /// How far the drain got inside the front request (`drainImports`'s loop position, kept because the
 /// port can stop at a sheet and resume).
 #[derive(Clone, Debug, Default)]
@@ -560,7 +570,7 @@ impl EditorSession {
     /// `drainImports()`.
     fn drain_imports(&mut self, host: &dyn SessionHost) {
         while !self.pending_imports.is_empty() {
-            if self.import_await.is_some() {
+            if self.import_await.as_ref().is_some_and(ImportAwait::is_unanswered) {
                 // A sheet is up: its answer resumes the drain, and `is_importing` stays true.
                 return;
             }
@@ -602,7 +612,7 @@ impl EditorSession {
                         // The sheet was cancelled: the file is skipped, as `guard let settings = … else { continue }` did.
                         None => ImportStep::Next,
                         Some(settings) => {
-                            self.import_developed_raw(&url, &settings, index, host);
+                            self.import_developed_raw(&url, &settings, host);
                             ImportStep::Next
                         }
                     };
@@ -619,7 +629,7 @@ impl EditorSession {
                             .pending_imports
                             .first()
                             .and_then(|request| request.files.get(index))
-                            .map(file_stem)
+                            .map(|url| file_stem(url))
                             .unwrap_or_default();
                         if let Err(message) = self.insert_photoshop(&imported, &name, point) {
                             self.record_import_failure(&name, &message);
@@ -1107,9 +1117,13 @@ mod tests {
         session.undo();
         assert!(!session.is_modified());
 
-        // A save of a captured revision stays saved while later edits go on.
+        // A save of a captured revision stays saved while later edits go on. The layer is back at
+        // the saved state, so this edit has to actually change the effects (an empty write would be
+        // refused as identical, in Swift too).
         let (snapshot, revision) = session.prepare_save().expect("a document is open");
-        session.set_effects(LayerEffects::default(), Some(id), "Layer Effects");
+        let mut later = LayerEffects::default();
+        later.stroke = Some(StrokeEffect { size: 7.0, ..StrokeEffect::default() });
+        session.set_effects(later, Some(id), "Layer Effects");
         session
             .save_project(&snapshot, Path::new("P.comp"), revision, &host)
             .expect("the host saves");
@@ -1241,7 +1255,11 @@ mod tests {
         let smaller = snapshot_with(&["A"]);
         session.reload_project(&smaller);
         assert_eq!(session.document.as_ref().map(|document| document.layers.len()), Some(1));
-        assert_eq!(session.active_layer_id, None, "the active layer is gone, so nothing stays selected");
+        assert_eq!(
+            session.active_layer_id,
+            smaller.manifest.active_layer_id,
+            "the old selection is gone, so the reloaded package's own active layer stays selected"
+        );
         assert!(session.collapsed_group_ids.is_empty(), "the collapsed id is not in the reloaded package");
     }
 
@@ -1260,7 +1278,9 @@ mod tests {
         assert_eq!((document.width, document.height), (64, 64));
         assert_eq!(document.layers.len(), 1, "File > New starts with one blank layer");
         assert!(session.project_url.is_none());
-        assert!(!session.is_modified());
+        // `clearProject()` resets the history and `createDocument` then records its own "New Canvas"
+        // step, so Swift's `isModified` reads true for the fresh document.
+        assert!(session.is_modified(), "File > New records the New Canvas step over the reset history");
 
         session.create_new_project(0, 64);
         assert_eq!(session.document.as_ref().map(|document| document.width), Some(64), "an out-of-range side is refused");

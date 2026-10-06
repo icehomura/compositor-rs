@@ -1,10 +1,9 @@
 //! Live (clipping) masks: which layer's coverage hides which, and what happens to the dependents when
 //! a supplying layer is deleted.
 //!
-//! Port of `Document/LiveLayerMask.swift`'s `extension EditorSession`, minus `drawLiveComposite` —
-//! that one takes a `CGContext` and belongs to the drawing pipeline in `compositor-render`
-//! (`Composite`/`LiveMaskRenderer`); the session half it reads (`displayedTransform(for:)`,
-//! `displayedBlendMode(for:)`, `displayedMaskPlacement(for:)`) lives with the transform/view modules.
+//! Port of `Document/LiveLayerMask.swift`'s `extension EditorSession`, `drawLiveComposite` included:
+//! that one draws through `compositor-render`'s `LiveMaskRenderer` and the session's
+//! `displayedTransform`/`displayedBlendMode`/`displayedMaskPlacement`.
 //!
 //! **Async → sync.** `deleteWithLiveMaskChoice` baked on a background `Task` behind `isProjectBusy`;
 //! the port bakes through [`SessionHost::bake_live_mask`] on the calling thread with the same busy flag
@@ -16,10 +15,19 @@
 //! `EditorSession`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use compositor_core::document::{ImageLayer, ProjectError, ProjectLayerRecord};
-use compositor_core::imported_image::ImportedImage;
-use compositor_core::Id;
+use compositor_core::document::{CanvasDocument, ImageLayer, ProjectError, ProjectLayerRecord};
+use compositor_core::geom::{Point, Rect};
+use compositor_core::imported_image::{ImportedImage, PixelImage};
+use compositor_core::layer_mask::FolderMaskClip;
+use compositor_core::layer_transform::LayerInterpolationQuality;
+use compositor_core::{Id, LayerBlendMode};
+use compositor_pixels::canvas::{Canvas, InterpolationQuality};
+use compositor_pixels::effects::LayerEffectsRenderer;
+use compositor_render::adjustment_surface::AdjustmentSurface;
+use compositor_render::layer_renderer::LayerRenderer;
+use compositor_render::live_mask_renderer::{LiveMaskRenderer, MaskClip};
 
 use crate::projects::SessionHost;
 use crate::EditorSession;
@@ -251,7 +259,8 @@ impl EditorSession {
         if below_is_group {
             return;
         }
-        self.link_mask(below_source.unwrap_or(below), id);
+        // Swift's `linkMask` is `@discardableResult`: the toggle has already checked the guard itself.
+        let _ = self.link_mask(below_source.unwrap_or(below), id);
     }
 
     /// `releaseDetachedClipping(in:)`: a moved layer stops clipping when it no longer belongs to the
@@ -423,5 +432,394 @@ impl EditorSession {
             removed.insert(*id);
         }
         removed
+    }
+}
+
+impl EditorSession {
+    /// `drawLiveComposite(_:in:onSurface:)`: the document as the canvas shows it — live (clipping)
+    /// masks, the displayed transforms, folder masks, layer effects and adjustment layers — into
+    /// `canvas`. `on_surface` is set on the copy drawn inside an [`AdjustmentSurface`], which keeps
+    /// the spatial adjustments' halo off the recursion.
+    pub fn draw_live_composite(&self, document: &CanvasDocument, canvas: &mut Canvas, on_surface: bool) {
+        if !on_surface && document.layers.iter().any(|layer| layer.adjustment.is_some()) {
+            AdjustmentSurface::draw(canvas, 0.0, |surface| self.draw_live_composite(document, surface, true));
+            return;
+        }
+        let records: HashMap<Id, ImageLayer> = document.layers.iter().map(|layer| (layer.id, layer.clone())).collect();
+        let mut live = LiveMaskRenderer::new(
+            user_space_clip_bounds(canvas),
+            |id: Id| records.get(&id).and_then(|layer| layer.mask_source_id),
+            |id: Id, target: &mut Canvas| {
+                let Some(layer) = records.get(&id) else { return };
+                let Some(image) = layer.asset.as_ref().map(|asset| &asset.image) else { return };
+                let opacity = layer.effective_opacity(&records);
+                let transform = self.displayed_transform(layer);
+                let mask = layer.mask.as_ref().and_then(|mask| {
+                    let placement = self.displayed_mask_placement(layer);
+                    mask.clip_image(placement.as_ref(), &transform, image.width(), image.height(), None)
+                });
+                let effects = image.as_rgba().and_then(|pixels| {
+                    LayerEffectsRenderer::cached(pixels, mask.as_ref().and_then(PixelImage::as_gray), layer.effects.as_ref())
+                });
+                let mode = self.displayed_blend_mode(layer);
+                // Core Graphics blended Color Burn, Color Dodge and Soft Light wrong and lacked the
+                // rest of the modes `SeparableBlend.needsSurface` names; `SeparableBlend.draw` sent
+                // them through a read-back surface and a Core Image filter. The kernels behind
+                // `LayerRenderer::draw` compute every mode directly, so this one draw is the pass.
+                if let Some(rendered) = effects {
+                    let grown = LayerEffectsRenderer::placed(&transform, &rendered.image, rendered.inset);
+                    LayerRenderer::draw(
+                        &PixelImage::Rgba(Arc::new(rendered.image)),
+                        &grown,
+                        grown.center(),
+                        1.0,
+                        opacity,
+                        mode,
+                        None,
+                        target,
+                    );
+                } else {
+                    LayerRenderer::draw(image, &transform, transform.center(), 1.0, opacity, mode, mask.as_ref(), target);
+                }
+            },
+        );
+        live.adjustment = Box::new(|id| records.get(&id).and_then(|layer| layer.adjustment.clone()));
+        live.adjustment_opacity =
+            Box::new(|id| records.get(&id).map_or(1.0, |layer| layer.effective_opacity(&records)));
+        live.adjustment_clip = Box::new(|id, target| {
+            let Some(layer) = records.get(&id) else { return };
+            let Some(PixelImage::Gray(image)) = layer.mask.as_ref().and_then(|mask| mask.enabled_image()) else {
+                return;
+            };
+            let transform = layer.transform;
+            let clip = FolderMaskClip { image: Arc::clone(image), transform };
+            apply_folder_mask_clip(target, &clip, transform.center());
+        });
+
+        let render_ids: Vec<Id> = document.render_layers().iter().map(|layer| layer.id).collect();
+        live.prepare_stacks(
+            &render_ids,
+            |id| records.get(&id).and_then(|layer| layer.parent_id),
+            |id| records.get(&id).map_or(LayerBlendMode::Normal, |layer| self.displayed_blend_mode(layer)),
+        );
+
+        // `FolderMaskClip.draw`: every layer is clipped by each folder containing it, a folder's clip
+        // placed once, and then the live composite draws the layer itself.
+        let mut clips: HashMap<Id, Option<FolderMaskClip>> = HashMap::new();
+        for id in &render_ids {
+            let mut appliers: Vec<FolderMaskClip> = Vec::new();
+            let mut folder = records.get(id).and_then(|layer| layer.parent_id);
+            let mut depth = 0;
+            while let Some(current) = folder {
+                if depth >= 64 {
+                    break;
+                }
+                let clip = clips.entry(current).or_insert_with(|| {
+                    let folder = records.get(&current)?;
+                    let transform = self.displayed_transform(folder);
+                    match folder.mask.as_ref().and_then(|mask| mask.enabled_image()) {
+                        Some(PixelImage::Gray(image)) => Some(FolderMaskClip { image: Arc::clone(image), transform }),
+                        _ => None,
+                    }
+                });
+                if let Some(clip) = clip.as_ref() {
+                    appliers.push(clip.clone());
+                }
+                folder = records.get(&current).and_then(|layer| layer.parent_id);
+                depth += 1;
+            }
+            if appliers.is_empty() {
+                live.draw_composite(*id, canvas);
+                continue;
+            }
+            canvas.save();
+            for clip in &appliers {
+                apply_folder_mask_clip(canvas, clip, clip.transform.center());
+            }
+            live.draw_composite(*id, canvas);
+            canvas.restore();
+        }
+    }
+}
+
+/// `context.boundingBoxOfClipPath`, in the canvas's drawing space.
+fn user_space_clip_bounds(canvas: &Canvas) -> Rect {
+    let corners = canvas
+        .clip_bounds()
+        .corners()
+        .map(|point| canvas.user_space_to_device().inverted().applying(point));
+    let min_x = corners.iter().map(|point| point.x).fold(f64::INFINITY, f64::min);
+    let max_x = corners.iter().map(|point| point.x).fold(f64::NEG_INFINITY, f64::max);
+    let min_y = corners.iter().map(|point| point.y).fold(f64::INFINITY, f64::min);
+    let max_y = corners.iter().map(|point| point.y).fold(f64::NEG_INFINITY, f64::max);
+    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y).standardized()
+}
+
+/// `FolderMaskClip.apply` at its default scale: the mask stretched over the folder's box, clipping
+/// what is inside it and leaving the canvas's transform as it found it.
+fn apply_folder_mask_clip(canvas: &mut Canvas, clip: &FolderMaskClip, center: Point) {
+    let (placement, inverse) = clip.placement(1.0, center);
+    canvas.set_interpolation_quality(canvas_quality(clip.transform.sampling.quality()));
+    canvas.concatenate(placement);
+    canvas.clip_to_image(&clip.image, clip.rect(1.0));
+    canvas.concatenate(inverse);
+}
+
+/// `LayerSampling.quality` as the canvas's interpolation quality — `compositor-render`'s
+/// `canvas_quality`, which is crate-private there.
+fn canvas_quality(quality: LayerInterpolationQuality) -> InterpolationQuality {
+    match quality {
+        LayerInterpolationQuality::None => InterpolationQuality::None,
+        LayerInterpolationQuality::Low => InterpolationQuality::Low,
+        LayerInterpolationQuality::High => InterpolationQuality::High,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compositor_core::buffer::Rgba8Image;
+    use compositor_core::document::CanvasDocument;
+    use compositor_core::geom::Point;
+    use compositor_core::imported_image::PixelImage;
+    use std::sync::Arc;
+
+    fn asset(name: &str) -> ImportedImage {
+        ImportedImage::new(
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(4, 4))),
+            PixelImage::Rgba(Arc::new(Rgba8Image::new(2, 2))),
+            name,
+        )
+    }
+
+    /// Bottom to top, as the document stores them (`LiveMaskTests.fixture`'s shape).
+    fn session_with_layers(count: usize) -> (EditorSession, Vec<Id>) {
+        let mut session = EditorSession::default();
+        let mut document = CanvasDocument::new(8, 8);
+        let mut ids = Vec::new();
+        for index in 0..count {
+            let layer = ImageLayer::from_asset(asset(&format!("Layer {index}")), Point::ZERO);
+            ids.push(layer.id);
+            document.layers.push(layer);
+        }
+        session.document = Some(document);
+        session.set_active_layer(ids.last().copied());
+        (session, ids)
+    }
+
+    fn layer(session: &EditorSession, id: Id) -> &ImageLayer {
+        session
+            .document
+            .as_ref()
+            .and_then(|document| document.layers.iter().find(|layer| layer.id == id))
+            .expect("the layer is there")
+    }
+
+    /// A host that bakes a fixed asset, so the delete path can be checked without a renderer.
+    struct Baker(ImportedImage);
+    impl SessionHost for Baker {
+        fn bake_live_mask(&self, _snapshot: &compositor_core::document::ProjectSnapshot, _target: Id) -> Result<Option<ImportedImage>, String> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn option_click_creates_a_shared_stack_and_releases_it_again() {
+        let (mut session, ids) = session_with_layers(3);
+        assert!(!session.can_toggle_clipping_mask(ids[0]), "the bottom layer has nothing below it");
+        assert!(session.can_toggle_clipping_mask(ids[1]));
+        session.toggle_clipping_mask(ids[0]);
+        assert_eq!(layer(&session, ids[0]).mask_source_id, None);
+
+        session.toggle_clipping_mask(ids[1]);
+        session.toggle_clipping_mask(ids[2]);
+        assert_eq!(layer(&session, ids[1]).mask_source_id, Some(ids[0]));
+        assert_eq!(layer(&session, ids[2]).mask_source_id, Some(ids[0]), "a later layer joins the base's stack");
+        assert_eq!(session.history.undo_name(), "Create Clipping Mask");
+
+        session.toggle_clipping_mask(ids[2]);
+        assert_eq!(layer(&session, ids[2]).mask_source_id, None);
+        assert_eq!(layer(&session, ids[1]).mask_source_id, Some(ids[0]), "the layer below keeps its clip");
+        assert_eq!(session.history.undo_name(), "Release Clipping Mask");
+
+        // Releasing the base releases the stack above it that shares the base.
+        session.toggle_clipping_mask(ids[2]);
+        session.toggle_clipping_mask(ids[1]);
+        assert_eq!(layer(&session, ids[1]).mask_source_id, None);
+        assert_eq!(layer(&session, ids[2]).mask_source_id, None);
+    }
+
+    #[test]
+    fn a_folder_can_neither_supply_nor_take_a_live_mask() {
+        let (mut session, ids) = session_with_layers(2);
+        session.document.as_mut().expect("a document").layers[0].is_group = true;
+        assert!(!session.can_link_mask(ids[0], ids[1]), "a folder cannot supply");
+        assert!(!session.can_toggle_clipping_mask(ids[1]));
+        session.document.as_mut().expect("a document").layers[1].is_group = true;
+        assert!(!session.can_link_mask(ids[0], ids[1]), "a folder cannot take one");
+    }
+
+    #[test]
+    fn a_cycle_is_refused_and_the_graph_rejects_it() {
+        let (mut session, ids) = session_with_layers(2);
+        assert!(session.link_mask(ids[0], ids[1]));
+        assert!(!session.link_mask(ids[1], ids[0]), "a cycle is refused");
+        assert!(!session.link_mask(ids[0], ids[0]), "a layer cannot mask itself");
+
+        let records: Vec<ProjectLayerRecord> = session
+            .document
+            .as_ref()
+            .expect("a document")
+            .layers
+            .iter()
+            .map(ImageLayer::hierarchy_record)
+            .collect();
+        assert!(LiveMaskGraph::validate(&records).is_ok());
+        let mut cyclic = records.clone();
+        cyclic[0].mask_source_id = Some(cyclic[1].id);
+        assert!(LiveMaskGraph::validate(&cyclic).is_err(), "the graph refuses a cycle");
+        let mut duplicate = records.clone();
+        duplicate.push(records[0].clone());
+        assert!(LiveMaskGraph::validate(&duplicate).is_err(), "the graph refuses a duplicate id");
+        let mut folder_source = records.clone();
+        folder_source[0].mask_source_id = Some(folder_source[1].id);
+        folder_source[1].is_group = Some(true);
+        assert!(LiveMaskGraph::validate(&folder_source).is_err(), "the graph refuses a folder source");
+    }
+
+    #[test]
+    fn the_delete_alert_matches_the_swift_wording() {
+        let (mut session, ids) = session_with_layers(3);
+        assert!(session.live_mask_delete_alert(&[ids[0]]).is_none(), "nothing supplies a mask yet");
+        assert!(session.link_mask(ids[0], ids[1]));
+        assert!(session.link_mask(ids[1], ids[2]));
+        assert_eq!(session.live_mask_delete_targets(&[ids[0]]), vec![ids[1]]);
+
+        let alert = session.live_mask_delete_alert(&[ids[0]]).expect("the supplier asks");
+        assert_eq!(alert.message, "This layer supplies a live mask");
+        assert_eq!(
+            alert.informative,
+            "Bake keeps the current masked appearance in the dependent layers’ pixels. Remove Links reveals their pixels. You can undo either choice."
+        );
+        assert_eq!((alert.bake, alert.cancel, alert.remove_links), ("Bake and Delete", "Cancel", "Remove Links and Delete"));
+        // Two ids go, both supply live masks, and a dependent stays: the plural sheet.
+        assert_eq!(
+            session
+                .live_mask_delete_alert(&[ids[0], ids[1]])
+                .expect("two suppliers")
+                .message,
+            "These layers supply live masks"
+        );
+        // With every dependent going too, Swift's guard has nothing left to ask about.
+        assert!(session.live_mask_delete_alert(&ids).is_none(), "no layer stays that a deleted one supplies");
+    }
+
+    #[test]
+    fn removing_the_links_deletes_without_baking() {
+        let (mut session, ids) = session_with_layers(2);
+        assert!(session.link_mask(ids[0], ids[1]));
+        assert!(session.delete_with_live_mask_choice(&[ids[0]], LiveMaskDeleteChoice::RemoveLinksAndDelete, &Baker(asset("Baked"))));
+        assert_eq!(session.document.as_ref().expect("a document").layers.len(), 1);
+        let survivor = layer(&session, ids[1]);
+        assert_eq!(survivor.mask_source_id, None);
+        assert_eq!(survivor.asset.as_ref().map(|asset| asset.name.clone()), Some("Layer 1".to_string()));
+    }
+
+    #[test]
+    fn baking_installs_the_pixels_the_baker_returned() {
+        let (mut session, ids) = session_with_layers(2);
+        assert!(session.link_mask(ids[0], ids[1]));
+        session.begin_project_operation();
+        session.end_project_operation();
+        assert!(session.delete_with_live_mask_choice(&[ids[0]], LiveMaskDeleteChoice::BakeAndDelete, &Baker(asset("Baked"))));
+        let survivor = layer(&session, ids[1]);
+        assert_eq!(survivor.mask_source_id, None);
+        assert_eq!(survivor.asset.as_ref().map(|asset| asset.name.clone()), Some("Baked".to_string()));
+        assert!(!session.is_project_busy, "the busy flag the bake set is cleared again");
+    }
+
+    #[test]
+    fn cancelling_the_delete_changes_nothing() {
+        let (mut session, ids) = session_with_layers(2);
+        assert!(session.link_mask(ids[0], ids[1]));
+        assert!(session.delete_with_live_mask_choice(&[ids[0]], LiveMaskDeleteChoice::Cancel, &Baker(asset("Baked"))));
+        assert_eq!(session.document.as_ref().expect("a document").layers.len(), 2);
+        assert_eq!(layer(&session, ids[1]).mask_source_id, Some(ids[0]));
+    }
+
+    #[test]
+    fn deleting_a_supplier_without_an_alert_is_the_callers_job() {
+        let (mut session, ids) = session_with_layers(2);
+        assert!(!session.delete_with_live_mask_choice(&[ids[0]], LiveMaskDeleteChoice::RemoveLinksAndDelete, &Baker(asset("Baked"))));
+        assert_eq!(session.document.as_ref().expect("a document").layers.len(), 2, "nothing was deleted");
+    }
+
+    #[test]
+    fn deleting_a_layer_installs_baked_pixels_from_the_map() {
+        let (mut session, ids) = session_with_layers(2);
+        assert!(session.link_mask(ids[0], ids[1]));
+        let baked = std::collections::HashMap::from([(ids[1], asset("Baked"))]);
+        session.finish_deleting_layer(ids[0], &baked);
+        assert_eq!(session.history.undo_name(), "Delete Layer");
+        assert_eq!(session.document.as_ref().expect("a document").layers.len(), 1);
+        let survivor = layer(&session, ids[1]);
+        assert_eq!(survivor.mask_source_id, None);
+        assert_eq!(survivor.asset.as_ref().map(|asset| asset.name.clone()), Some("Baked".to_string()));
+    }
+
+    #[test]
+    fn deleting_several_layers_is_one_undo_step() {
+        let (mut session, ids) = session_with_layers(3);
+        let steps = session.history.undo_count();
+        session.finish_deleting_layers(&[ids[0], ids[1]], &std::collections::HashMap::new());
+        assert_eq!(session.document.as_ref().expect("a document").layers.len(), 1);
+        assert_eq!(session.history.undo_count(), steps + 1, "a batch is one step");
+        assert_eq!(session.history.undo_name(), "Delete Layers");
+    }
+
+    #[test]
+    fn a_layer_dropped_into_a_stack_adopts_its_clip() {
+        let (_, ids) = session_with_layers(3);
+        // Bottom to top: base, moved, client (clipped to the base).
+        let base = ImageLayer::from_asset(asset("Base"), Point::ZERO);
+        let moved = ImageLayer::from_asset(asset("Moved"), Point::ZERO);
+        let mut client = ImageLayer::from_asset(asset("Client"), Point::ZERO);
+        client.mask_source_id = Some(base.id);
+        let base_id = base.id;
+        let moved_id = moved.id;
+        let mut layers = vec![base, moved, client];
+        let _ = ids;
+        EditorSession::adopt_clipping(moved_id, &mut layers);
+        assert_eq!(
+            layers.iter().find(|layer| layer.id == moved_id).expect("the moved layer").mask_source_id,
+            Some(base_id),
+            "dropped between a base and its client, it clips to the base too"
+        );
+    }
+
+    #[test]
+    fn a_layer_moved_out_of_its_stack_stops_clipping() {
+        let base = ImageLayer::from_asset(asset("Base"), Point::ZERO);
+        let mut client = ImageLayer::from_asset(asset("Client"), Point::ZERO);
+        client.mask_source_id = Some(base.id);
+        let base_id = base.id;
+        let client_id = client.id;
+        // Moved below its base: the pair is no longer a contiguous stack.
+        let mut layers = vec![client.clone(), base.clone()];
+        EditorSession::release_detached_clipping(&mut layers);
+        assert_eq!(layers.iter().find(|layer| layer.id == client_id).expect("the client").mask_source_id, None);
+
+        // A chain clipped to the same base keeps its clips.
+        let mut second = ImageLayer::from_asset(asset("Second"), Point::ZERO);
+        second.mask_source_id = Some(base_id);
+        let second_id = second.id;
+        let mut chain = vec![base, client, second];
+        EditorSession::release_detached_clipping(&mut chain);
+        assert_eq!(chain.iter().find(|layer| layer.id == client_id).expect("the client").mask_source_id, Some(base_id));
+        assert_eq!(
+            chain.iter().find(|layer| layer.id == second_id).expect("the second client").mask_source_id,
+            Some(base_id),
+            "the stack stays contiguous above its base, so both clients keep the shared clip, as Swift's running-base rule has it"
+        );
     }
 }

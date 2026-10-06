@@ -9,9 +9,9 @@
 
 use compositor_core::document::NavigationTool;
 use compositor_core::error::CoreError;
-use compositor_core::geom::{Point, Size};
+use compositor_core::geom::Point;
 use compositor_core::image_ops::{GradientSettings, GradientShape, GradientStyle};
-use compositor_core::palette::PaletteColor;
+use compositor_core::color::PaletteColor;
 use compositor_pixels::brush::{BrushSettings, BrushStroke, GradientShape as PixelGradientShape};
 
 use crate::brush::brush_failure;
@@ -250,6 +250,7 @@ impl EditorSession {
 mod tests {
     use super::*;
     use compositor_core::document::{CanvasDocument, ImageLayer};
+    use compositor_core::geom::Size;
 
     /// A session with one 64-pixel layer selected and a pending gradient on it.
     fn session_with_gradient() -> EditorSession {

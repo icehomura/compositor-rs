@@ -27,6 +27,7 @@ use compositor_core::raster::{RasterSnapshot, THUMBNAIL_MAX_SIDE};
 use compositor_core::Id;
 use compositor_pixels::brush::{BrushCommit, BrushSettings, BrushStroke, CloneSample};
 use compositor_pixels::canvas::Canvas;
+use compositor_pixels::raster::Raster;
 use compositor_pixels::warp::{BlurToolMode, BrushToolMode, WarpStroke};
 use compositor_render::LayerRenderer;
 use rustc_hash::FxHashMap;
@@ -157,6 +158,26 @@ pub fn brush_failure(error: &CoreError) -> String {
     }
 }
 
+/// The undo entry's name for a stroke: the stroke's own name when it has one (Smudge, Liquify), else
+/// the kind that painted it, exactly as `commitPaintSnapshot` names them.
+pub(crate) fn paint_edit_name(stroke: &BrushStroke) -> String {
+    stroke.edit_name.clone().unwrap_or_else(|| {
+        if stroke.is_mask {
+            "Paint Mask".to_string()
+        } else if stroke.settings.erasing {
+            "Erase".to_string()
+        } else if stroke.is_blur {
+            "Blur".to_string()
+        } else if stroke.clone.is_some() {
+            "Clone Stamp".to_string()
+        } else if stroke.settings.healing {
+            "Spot Healing".to_string()
+        } else {
+            "Brush Stroke".to_string()
+        }
+    })
+}
+
 /// Swift's `lhs.asset?.image === rhs.asset?.image`: the two shared rasters are the same allocation.
 fn same_image(lhs: Option<&ImportedImage>, rhs: Option<&ImportedImage>) -> bool {
     match (lhs, rhs) {
@@ -266,7 +287,9 @@ impl EditorSession {
             })
             .sum();
         stroke.pixel_limit = limits::document_pixel_budget().saturating_sub(used);
-        stroke.selection_clip = self.selection().map(|selection| selection.clip(document.size()));
+        // The selection is the rasterized clip, not core's bare geometry: the pixels side reads a
+        // coverage-less clip as "nothing is selected" and would paint nothing.
+        stroke.selection_clip = self.selection_clip();
         if !self.is_mask_selected && layer.mask.is_some() {
             let mask_pixels: usize = document
                 .layers
@@ -510,22 +533,7 @@ impl EditorSession {
                 }
             }
         }
-        let name = stroke.edit_name.clone().unwrap_or_else(|| {
-            if stroke.is_mask {
-                "Paint Mask".to_string()
-            } else if stroke.settings.erasing {
-                "Erase".to_string()
-            } else if stroke.is_blur {
-                "Blur".to_string()
-            } else if stroke.clone.is_some() {
-                "Clone Stamp".to_string()
-            } else if stroke.settings.healing {
-                "Spot Healing".to_string()
-            } else {
-                "Brush Stroke".to_string()
-            }
-        });
-        self.begin_edit(&name);
+        self.begin_edit(&paint_edit_name(stroke));
         if stroke.is_mask {
             let painted_transform = result.transform;
             let grew = result.bounds != stroke.source_rect;
@@ -870,18 +878,14 @@ impl EditorSession {
             if let Some(owned) = layer.mask.as_ref() {
                 // Past its pixels a mask keeps its edge tone, so blurring near its edge doesn't pull
                 // in the wrong one.
-                target.set_fill_gray(owned.asset.thumbnail.as_gray().map_or(1.0, LayerMask::background));
+                target.set_fill_gray(crate::selection::mask_background(&owned.asset.thumbnail));
                 target.fill_rect(Rect::new(0.0, 0.0, width as f64, height as f64));
             }
-            if let PixelImage::Gray(image) = &image {
-                target.draw_coverage(image, placed);
-            }
+            Raster::draw(&image, placed, true, &mut target);
             PixelImage::Gray(Arc::new(target.into_gray()))
         } else {
             let mut target = Canvas::new_rgba(width, height);
-            if let PixelImage::Rgba(image) = &image {
-                target.draw_image(image, placed);
-            }
+            Raster::draw(&image, placed, false, &mut target);
             PixelImage::Rgba(Arc::new(target.into_rgba()))
         };
         let soft = compositor_pixels::filters::gaussian_blur(&sharp, sigma * fit, stroke.is_mask);
@@ -1026,6 +1030,36 @@ mod tests {
         BrushTip::new(diameter, hardness, opacity)
     }
 
+    /// A session with one selected, visible 64-pixel layer and no document selection.
+    fn visible_session() -> EditorSession {
+        let mut session = EditorSession::default();
+        let layer = ImageLayer::blank("Layer 1", Size::new(64.0, 64.0));
+        let id = layer.id;
+        let mut document = CanvasDocument::new(64, 64);
+        document.layers = vec![layer];
+        session.document = Some(document);
+        session.active_layer_id = Some(id);
+        session.selected_layer_ids = [id].into_iter().collect();
+        session.tool = NavigationTool::Brush;
+        session
+    }
+
+    /// A stroke the engine accepts on a 64-pixel layer.
+    fn stroke(settings: BrushSettings, mask: bool) -> BrushStroke {
+        let layer = ImageLayer::blank("Layer 1", Size::new(64.0, 64.0));
+        BrushStroke::new(&layer, mask, settings, Size::new(64.0, 64.0), false)
+            .expect("a default stroke fits a 64-pixel canvas")
+    }
+
+    /// Any sample; the edit name only asks whether the stroke carries one.
+    fn clone_sample() -> CloneSample {
+        CloneSample {
+            image: PixelImage::Gray(Arc::new(compositor_core::buffer::Gray8Image::uniform(1, 1, 0))),
+            placed: Rect::new(0.0, 0.0, 1.0, 1.0),
+            in_grid: true,
+        }
+    }
+
     /// The Clone Stamp and Smear families each park their own tip; both start soft and 40 wide.
     #[test]
     fn parked_tip_families_start_as_photoshop_hands_them_over() {
@@ -1135,6 +1169,99 @@ mod tests {
         assert_eq!(session.brush_settings.hardness, 0.0);
     }
 
+    /// A lone visible layer with nothing selected is paintable; each blocked target gets the Swift's
+    /// own explanation, in the Swift's order.
+    #[test]
+    fn paint_refusal_explains_each_blocked_target() {
+        let mut session = visible_session();
+        assert_eq!(session.paint_refusal(), None);
+        assert!(session.can_paint());
+
+        session.tool = NavigationTool::Brush;
+        session.selected_layer_ids = [session.active_layer_id.expect("active"), compositor_core::new_id()]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            session.paint_refusal().as_deref(),
+            Some("Several layers are selected. Select just one to paint on it.")
+        );
+        assert!(!session.can_paint());
+
+        // A folder's pixels are inside it, so only its mask can be painted.
+        let mut session = visible_session();
+        session.document.as_mut().expect("a document").layers[0].is_group = true;
+        assert_eq!(
+            session.paint_refusal().as_deref(),
+            Some("“Layer 1” is a folder, which has no pixels of its own. Paint on a layer inside it, or on the folder’s mask.")
+        );
+
+        // A hidden layer is named, not painted.
+        let mut session = visible_session();
+        session.document.as_mut().expect("a document").layers[0].is_visible = false;
+        assert_eq!(
+            session.paint_refusal().as_deref(),
+            Some("“Layer 1” is hidden, or inside a hidden folder. Show it to paint on it.")
+        );
+
+        // An explicitly empty selection has nowhere to paint.
+        let mut session = visible_session();
+        session.document.as_mut().expect("a document").selection =
+            Some(compositor_core::selection::DocumentSelection::new(compositor_core::path::Path::empty()));
+        assert_eq!(
+            session.paint_refusal().as_deref(),
+            Some("Nothing is selected, so there’s nowhere to paint. Choose Select › Deselect (⌘D) to paint anywhere.")
+        );
+    }
+
+    /// The undo entry a stroke commits under: its own name when the stroke has one (Smudge, Liquify),
+    /// otherwise the kind that painted it, in the Swift's chain order.
+    #[test]
+    fn paint_edit_names_follow_the_stroke_kind() {
+        let mut plain = stroke(BrushSettings::default(), false);
+        assert_eq!(paint_edit_name(&plain), "Brush Stroke");
+        assert_eq!(paint_edit_name(&stroke(BrushSettings::default(), true)), "Paint Mask");
+
+        let erasing = stroke(
+            BrushSettings {
+                erasing: true,
+                ..BrushSettings::default()
+            },
+            false,
+        );
+        let mut erasing_blur = stroke(
+            BrushSettings {
+                erasing: true,
+                ..BrushSettings::default()
+            },
+            false,
+        );
+        erasing_blur.is_blur = true;
+        assert_eq!(paint_edit_name(&erasing), "Erase");
+        assert_eq!(paint_edit_name(&erasing_blur), "Erase", "erasing comes first in the chain");
+
+        let mut blur = stroke(BrushSettings::default(), false);
+        blur.is_blur = true;
+        blur.clone = Some(clone_sample());
+        assert_eq!(paint_edit_name(&blur), "Blur", "blur comes before clone stamp");
+
+        let mut clone = stroke(BrushSettings::default(), false);
+        clone.clone = Some(clone_sample());
+        clone.settings.healing = true;
+        assert_eq!(paint_edit_name(&clone), "Clone Stamp", "clone stamp comes before spot healing");
+
+        let healing = stroke(
+            BrushSettings {
+                healing: true,
+                ..BrushSettings::default()
+            },
+            false,
+        );
+        assert_eq!(paint_edit_name(&healing), "Spot Healing");
+
+        plain.edit_name = Some("Liquify".to_string());
+        assert_eq!(paint_edit_name(&plain), "Liquify", "a named stroke keeps its name");
+    }
+
     /// Two digits typed inside 0.6 s set an exact value; the second alone is a percentage.
     #[test]
     fn opacity_digits_pair_up_within_the_window() {
@@ -1148,8 +1275,8 @@ mod tests {
 
         session.type_opacity_digit(0, 200.0);
         assert_eq!(session.brush_settings.opacity, 1.0);
-        session.type_opacity_digit(5, 200.7);
-        assert_eq!(session.brush_settings.opacity, 0.05);
+        session.type_opacity_digit(5, 200.5);
+        assert_eq!(session.brush_settings.opacity, 0.05, "0 then 5 is 5%, not 50%");
 
         // Only the brush families, Gradient and Move read the number keys.
         session.tool = NavigationTool::Type;

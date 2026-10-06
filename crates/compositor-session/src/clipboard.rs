@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use compositor_core::blend::LayerBlendMode;
 use compositor_core::buffer::{Rgba8Image, SharedImage};
-use compositor_core::document::{CanvasDocument, ImageLayer};
+use compositor_core::document::ImageLayer;
 use compositor_core::geom::{Point, Rect};
 use compositor_core::imported_image::{ImportedImage, PixelImage};
 use compositor_core::layer_shape::LayerShape;
@@ -183,10 +183,12 @@ impl EditorSession {
     pub fn can_copy_merged(&self) -> bool {
         self.can_edit_layers()
             && self.selection().map(|selection| selection.is_empty()) != Some(true)
-            && self
-                .document
-                .as_ref()
-                .is_some_and(|document| document.render_layers().iter().any(|layer| layer.asset.is_some()))
+            && self.document.as_ref().is_some_and(|document| {
+                document
+                    .render_layers()
+                    .iter()
+                    .any(|layer| layer.asset.is_some())
+            })
     }
 
     /// Shift-Cmd-C (Copy Merged): the selection across every visible layer, composited as
@@ -208,7 +210,7 @@ impl EditorSession {
         // but Color Burn and Color Dodge need to read what they are blending with, which a group hides.
         let mut composite = Canvas::new_rgba(region.width() as usize, region.height() as usize);
         composite.translate(-region.min_x(), -region.min_y());
-        self.draw_live_composite(document, &mut composite);
+        self.draw_live_composite(document, &mut composite, false);
         let merged = composite.into_rgba();
         let mut canvas = Canvas::new_rgba(region.width() as usize, region.height() as usize);
         canvas.translate(-region.min_x(), -region.min_y());
@@ -232,7 +234,10 @@ impl EditorSession {
     /// Copy with no selection copies the layer itself, for Paste here or in another project. That works for folders
     /// and adjustments too, which have no pixels of their own to copy.
     pub fn can_copy_layer(&self) -> bool {
-        self.can_edit_layers() && self.active_layer().is_some() && self.selection().is_none() && !self.is_mask_selected
+        self.can_edit_layers()
+            && self.active_layer().is_some()
+            && self.selection().is_none()
+            && !self.is_mask_selected
     }
 
     /// Cmd-C: copies the selected pixels (or the whole layer) for Paste, and to the system
@@ -335,12 +340,13 @@ impl EditorSession {
         let Some(document) = self.document.as_ref() else {
             return;
         };
-        let fresh = self.pixel_clipboard.as_ref().is_some_and(|pixel_clipboard| {
-            match self.clipboard.as_ref() {
+        let fresh = self
+            .pixel_clipboard
+            .as_ref()
+            .is_some_and(|pixel_clipboard| match self.clipboard.as_ref() {
                 Some(clipboard) => clipboard.change_count() == pixel_clipboard.change_count,
                 None => true,
-            }
-        });
+            });
         if fresh {
             let Some(clip) = self.pixel_clipboard.clone() else {
                 return;
@@ -349,7 +355,10 @@ impl EditorSession {
             self.add_pixel_layer(clip.image, clip.origin, &name, "Paste", true, None, None);
             return;
         }
-        let external = self.clipboard.as_mut().and_then(|clipboard| clipboard.read_image());
+        let external = self
+            .clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.read_image());
         let Some(image) = external else {
             return;
         };
@@ -385,7 +394,15 @@ impl EditorSession {
             Ok(Some(copied)) => {
                 let name = self.next_layer_name();
                 let (image, region) = copied;
-                self.add_pixel_layer(Arc::new(image), region.origin, &name, "Layer via Copy", true, None, None);
+                self.add_pixel_layer(
+                    Arc::new(image),
+                    region.origin,
+                    &name,
+                    "Layer via Copy",
+                    true,
+                    None,
+                    None,
+                );
             }
             Ok(None) => {}
             Err(error) => self.brush_error = Some(error.to_string()),
@@ -444,7 +461,10 @@ impl EditorSession {
 /// coverage, with no coverage clipping everything away.
 fn apply_selection_clip(canvas: &mut Canvas, clip: Option<&SelectionClip>) {
     match clip {
-        Some(SelectionClip { rect, coverage: Some(coverage) }) if !rect.is_empty() => {
+        Some(SelectionClip {
+            rect,
+            coverage: Some(coverage),
+        }) if !rect.is_empty() => {
             canvas.clip_to_image(coverage, *rect);
         }
         Some(_) => canvas.clip_to_zero(),
@@ -452,25 +472,8 @@ fn apply_selection_clip(canvas: &mut Canvas, clip: Option<&SelectionClip>) {
     }
 }
 
-/// A thumbnail no larger than 96 pixels on its longest side (`PixelAdjust.thumbnail(of:)`).
-/// The Swift drew with interpolation `.none`, so the scale takes the nearest source pixel.
+/// A thumbnail no larger than 96 pixels on its longest side (`PixelAdjust.thumbnail(of:)`, which the
+/// pixel crate landed; the Swift drew with the nearest source pixel).
 pub(crate) fn rgba_thumbnail(image: &Rgba8Image) -> PixelImage {
-    let factor = (96.0 / image.width().max(image.height()).max(1) as f64).min(1.0);
-    let width = ((image.width() as f64 * factor) as usize).max(1);
-    let height = ((image.height() as f64 * factor) as usize).max(1);
-    let mut thumbnail = Rgba8Image::new(width, height);
-    if image.width() > 0 && image.height() > 0 {
-        for y in 0..height {
-            let source_y = (y * image.height() / height).min(image.height() - 1);
-            for x in 0..width {
-                let source_x = (x * image.width() / width).min(image.width() - 1);
-                thumbnail.set(x, y, image.get(source_x, source_y));
-            }
-        }
-    }
-    PixelImage::Rgba(Arc::new(thumbnail))
+    PixelImage::Rgba(Arc::new(compositor_pixels::adjustments::PixelAdjust::thumbnail(image)))
 }
-
-/// `PixelAdjust.bitmap`'s `.none` interpolation quality, matching the Swift `BrushRaster.context`
-/// that these copy paths drew through: no resampling, the pixels are copied as they lie.
-const _COPY_QUALITY_NONE: () = ();

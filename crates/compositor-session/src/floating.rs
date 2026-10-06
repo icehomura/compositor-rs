@@ -17,13 +17,14 @@ use compositor_core::layer_transform::{
 };
 use compositor_core::limits;
 use compositor_core::selection::DocumentSelection;
-use compositor_core::{CoreError, Gray8Image, Id};
+use compositor_core::{CoreError, Gray8Image};
 use compositor_pixels::brush::{BrushSettings, BrushStroke};
 use compositor_pixels::canvas::Canvas;
 use compositor_pixels::warp::DistortWarp;
 use compositor_render::LayerRenderer;
 
-use crate::selection::{draw_gray_scaled, mask_imported_image, rect_applying, rgba_thumbnail};
+use crate::clipboard::rgba_thumbnail;
+use crate::selection::{draw_gray_scaled, mask_imported_image, rect_applying};
 use crate::EditorSession;
 
 /// Selected pixels being dragged: the lifted raster plus the outline it started from.
@@ -151,8 +152,10 @@ impl FloatingMerge {
         {
             return Err(CoreError::TooLarge(limits::MAX_SURFACE_PIXELS));
         }
-        let mut canvas =
-            Canvas::new_rgba(extent.width().max(0.0) as usize, extent.height().max(0.0) as usize);
+        let mut canvas = Canvas::new_rgba(
+            extent.width().max(0.0) as usize,
+            extent.height().max(0.0) as usize,
+        );
         let placed = original.offset_by(-extent.min_x(), -extent.min_y());
         canvas.draw_image(source_image, placed);
         canvas.save();
@@ -216,8 +219,12 @@ impl EditorSession {
         self.transform_edit.is_none()
             && self.can_edit_pixels()
             && !self.is_mask_selected
-            && self.selection().is_some_and(|selection| !selection.is_empty())
-            && self.active_layer().is_some_and(|layer| layer.asset.is_some())
+            && self
+                .selection()
+                .is_some_and(|selection| !selection.is_empty())
+            && self
+                .active_layer()
+                .is_some_and(|layer| layer.asset.is_some())
     }
 
     /// Cmd-T: transforms the selected pixels when there is a selection, else the layer.
@@ -240,9 +247,13 @@ impl EditorSession {
         if !self.can_transform_selection() {
             return;
         }
-        let Some(before) = self.document.clone() else { return };
-        let Some(source) = self.active_layer().cloned() else { return };
-        let lifted = match self.render_selected_pixels(&source, false) {
+        let Some(before) = self.document.clone() else {
+            return;
+        };
+        let Some(source) = self.active_layer().cloned() else {
+            return;
+        };
+        let (lifted_image, lifted_region) = match self.render_selected_pixels(&source, false) {
             Ok(Some(lifted)) => lifted,
             Ok(None) => return,
             Err(error) => {
@@ -254,23 +265,24 @@ impl EditorSession {
         // Outer edit: closed by commitTransform (merge) or cancelTransform (restore).
         self.begin_edit("Transform Selection");
         self.clear_selected_pixels();
-        let Some(index) = self
-            .document
-            .as_ref()
-            .and_then(|document| document.layers.iter().position(|layer| layer.id == source.id))
-        else {
+        let Some(index) = self.document.as_ref().and_then(|document| {
+            document
+                .layers
+                .iter()
+                .position(|layer| layer.id == source.id)
+        }) else {
             self.document = Some(before);
             self.end_edit();
             return;
         };
-        let thumbnail = rgba_thumbnail(&lifted.image);
+        let thumbnail = rgba_thumbnail(&lifted_image);
         let mut floating = ImageLayer::from_asset(
             ImportedImage::new(
-                PixelImage::Rgba(Arc::new(lifted.image)),
+                PixelImage::Rgba(Arc::new(lifted_image)),
                 thumbnail,
                 "Floating Selection",
             ),
-            lifted.region.origin,
+            lifted_region.origin,
         );
         floating.name = "Floating Selection".to_string();
         floating.parent_id = source.parent_id;
@@ -289,7 +301,7 @@ impl EditorSession {
             before,
             before_active,
             original: draft,
-            pixel_size: lifted.region.size(),
+            pixel_size: lifted_region.size,
         });
         self.transform_edit = Some(edit);
     }
@@ -302,7 +314,8 @@ impl EditorSession {
         Some(
             pixel_to_document(&floating.original, width, height)
                 .inverted()
-                .concatenating(pixel_to_document(&edit.draft, width, height)),
+                // Swift `.concatenating` reads receiver-first: `then` here.
+                .then(pixel_to_document(&edit.draft, width, height)),
         )
     }
 
@@ -354,8 +367,9 @@ impl EditorSession {
         // A distorted selection is warped into its new shape first, then merged like any other.
         let placed = match edit.corners.as_ref() {
             Some(corners) => {
-                let warped = DistortWarp::warp_trimmed(&pixels, &edit.draft, corners)?;
-                (warped.image, warped.transform)
+                let (image, transform, _crop) =
+                    DistortWarp::warp_trimmed(&pixels, &edit.draft, corners)?;
+                (image, transform)
             }
             None => (pixels.clone(), edit.draft),
         };
@@ -380,24 +394,26 @@ impl EditorSession {
                 })
             })
         } else {
-            self.floating_selection_transform(edit).and_then(|transform| {
-                selection.map(|selection| {
-                    DocumentSelection::with_style(
-                        selection.path.transformed(&transform),
-                        selection.antialiased,
-                        selection.feather,
-                    )
+            self.floating_selection_transform(edit)
+                .and_then(|transform| {
+                    selection.map(|selection| {
+                        DocumentSelection::with_style(
+                            selection.path.transformed(&transform),
+                            selection.antialiased,
+                            selection.feather,
+                        )
+                    })
                 })
-            })
         };
         if let Some(document) = self.document.as_mut() {
             document.layers.retain(|layer| layer.id != edit.layer_id);
         }
-        let Some(index) = self
-            .document
-            .as_ref()
-            .and_then(|document| document.layers.iter().position(|layer| layer.id == source.id))
-        else {
+        let Some(index) = self.document.as_ref().and_then(|document| {
+            document
+                .layers
+                .iter()
+                .position(|layer| layer.id == source.id)
+        }) else {
             return Err(CoreError::MissingLayer(source.id.to_string()));
         };
         if let Some(document) = self.document.as_mut() {
@@ -434,13 +450,8 @@ impl EditorSession {
     /// The outline to draw: during a pixel move, the original shifted by the drag; while
     /// transforming selected pixels, the outline follows the handles.
     pub fn displayed_selection(&self) -> Option<DocumentSelection> {
-        if let Some(moved) = self
-            .pixel_move
-            .as_ref()
-            .map(PixelMove::moved_selection)
-            .filter(|_| self.pixel_move.is_some())
-        {
-            return Some(moved);
+        if let Some(pixel_move) = self.pixel_move.as_ref() {
+            return Some(pixel_move.moved_selection());
         }
         if let Some(edit) = self.transform_edit.as_ref() {
             if let Some(transform) = self.floating_selection_transform(edit) {
@@ -554,16 +565,4 @@ impl EditorSession {
         self.move_pixels(Size::new(dx, dy));
         self.finish_pixel_move();
     }
-}
-
-/// Helper used by tests and the app: a floating transform edit for `session`'s active layer, if any.
-pub fn floating_edit(session: &EditorSession) -> Option<(&TransformEdit, &FloatingTransform)> {
-    let edit = session.transform_edit.as_ref()?;
-    let floating = edit.floating.as_ref()?;
-    Some((edit, floating))
-}
-
-/// The document id of a floating edit's source layer, for callers that need it.
-pub fn floating_source_id(edit: &TransformEdit) -> Option<Id> {
-    edit.floating.as_ref().map(|floating| floating.source_id)
 }

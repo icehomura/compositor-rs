@@ -21,7 +21,9 @@ use compositor_core::layer_mask::LayerMask;
 use compositor_core::layer_transform::{LayerSampling, LayerTransform};
 use compositor_core::limits::{document_pixel_budget, MAX_SIDE, MAX_SURFACE_PIXELS};
 use compositor_pixels::canvas::{Canvas, InterpolationQuality};
-use compositor_pixels::trim::{calculate_trim_rect, trim_canvas_options, trim_is_noop, TrimOptions};
+use compositor_pixels::trim::{
+    calculate_trim_rect, trim_canvas_options, trim_is_noop, TrimOptions,
+};
 use compositor_render::layer_renderer::LayerRenderer;
 
 use crate::session::EditorSession;
@@ -48,7 +50,10 @@ impl CanvasResizer {
     /// transparent, or — when the sheet asked for a color and the canvas grew — a separate
     /// bottom "Canvas Extension" layer filled with it, with the old canvas' rectangle cleared out
     /// of it (holes in the existing artwork stay holes).
-    pub fn resize(document: &CanvasDocument, options: &CanvasSizeOptions) -> Result<CanvasDocument, ProjectError> {
+    pub fn resize(
+        document: &CanvasDocument,
+        options: &CanvasSizeOptions,
+    ) -> Result<CanvasDocument, ProjectError> {
         if !(1..=MAX_SIDE).contains(&options.width)
             || !(1..=MAX_SIDE).contains(&options.height)
             || options.anchor > 8
@@ -59,7 +64,10 @@ impl CanvasResizer {
         if !offset.is_finite() || offset.x.abs() > 1_000_000.0 || offset.y.abs() > 1_000_000.0 {
             return Err(ProjectError::Invalid);
         }
-        if options.width == document.width && options.height == document.height && offset == Point::ZERO {
+        if options.width == document.width
+            && options.height == document.height
+            && offset == Point::ZERO
+        {
             return Ok(document.clone());
         }
         let mut layers: Vec<ImageLayer> = Vec::with_capacity(document.layers.len() + 1);
@@ -114,8 +122,17 @@ impl CanvasResizer {
                     return Err(ProjectError::Invalid);
                 }
                 let mut canvas = Canvas::new_rgba(options.width, options.height);
-                canvas.set_fill_color(compositor_core::color::PaletteColor::new(color.red, color.green, color.blue));
-                canvas.fill_rect(Rect::new(0.0, 0.0, options.width as f64, options.height as f64));
+                canvas.set_fill_color(compositor_core::color::PaletteColor::new(
+                    color.red,
+                    color.green,
+                    color.blue,
+                ));
+                canvas.fill_rect(Rect::new(
+                    0.0,
+                    0.0,
+                    options.width as f64,
+                    options.height as f64,
+                ));
                 canvas.clear(Rect::new(
                     offset.x,
                     offset.y,
@@ -129,7 +146,9 @@ impl CanvasResizer {
                     PixelImage::Rgba(Arc::new(thumbnail)),
                     "Canvas Extension",
                 );
-                result.layers.insert(0, ImageLayer::from_asset(asset, Point::ZERO));
+                result
+                    .layers
+                    .insert(0, ImageLayer::from_asset(asset, Point::ZERO));
             }
         }
         Ok(result)
@@ -166,7 +185,10 @@ impl ImageResizer {
     /// Each transformed layer is rasterized on its own — a rotated rectangle scaled
     /// non-uniformly can shear, which an origin/size/angle cannot hold — and mask placements scale
     /// with the canvas.
-    pub fn resize(document: &CanvasDocument, options: &ImageSizeOptions) -> Result<CanvasDocument, ProjectError> {
+    pub fn resize(
+        document: &CanvasDocument,
+        options: &ImageSizeOptions,
+    ) -> Result<CanvasDocument, ProjectError> {
         if !(1..=MAX_SIDE).contains(&options.width)
             || !(1..=MAX_SIDE).contains(&options.height)
             || !options.resolution.is_finite()
@@ -199,10 +221,28 @@ impl ImageResizer {
                 .map(|(x, y)| layer.transform.point(Point::new(x, y)))
                 .map(|point| Point::new(point.x * sx, point.y * sy))
                 .collect();
-            let left = corners.iter().map(|point| point.x).fold(f64::INFINITY, f64::min).floor();
-            let top = corners.iter().map(|point| point.y).fold(f64::INFINITY, f64::min).floor();
-            let width_f = corners.iter().map(|point| point.x).fold(f64::NEG_INFINITY, f64::max).ceil() - left;
-            let height_f = corners.iter().map(|point| point.y).fold(f64::NEG_INFINITY, f64::max).ceil() - top;
+            let left = corners
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::INFINITY, f64::min)
+                .floor();
+            let top = corners
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::INFINITY, f64::min)
+                .floor();
+            let width_f = corners
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .ceil()
+                - left;
+            let height_f = corners
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::NEG_INFINITY, f64::max)
+                .ceil()
+                - top;
             if !(width_f.is_finite() && height_f.is_finite() && width_f >= 0.0 && height_f >= 0.0) {
                 return Err(ProjectError::TooLarge);
             }
@@ -288,9 +328,11 @@ impl ImageResizer {
                 }
                 if let Some(placement) = mask.placement {
                     let scaled = placement.placing(
+                        // Swift `A.concatenating(B)` runs the receiver first: the placement maps
+                        // to the old document, then the canvas scale lands on those coordinates.
                         placement
                             .unit_to_document()
-                            .concatenating(AffineTransform::scale(sx, sy)),
+                            .then(AffineTransform::scale(sx, sy)),
                     );
                     if let Some(moved_mask) = moved.mask.as_mut() {
                         moved_mask.placement = Some(scaled);
@@ -321,7 +363,11 @@ pub struct CanvasPreset {
 
 impl CanvasPreset {
     pub const fn new(title: &'static str, width: usize, height: usize) -> Self {
-        CanvasPreset { title, width, height }
+        CanvasPreset {
+            title,
+            width,
+            height,
+        }
     }
 
     /// Resolutions, Apple screens, then social formats; the menu divides them.
@@ -348,7 +394,10 @@ impl CanvasPreset {
 
     /// Every preset, in menu order (`CanvasPreset.all`).
     pub fn all() -> Vec<CanvasPreset> {
-        Self::GROUPS.iter().flat_map(|group| group.iter().copied()).collect()
+        Self::GROUPS
+            .iter()
+            .flat_map(|group| group.iter().copied())
+            .collect()
     }
 
     /// The preset the fields match, or nil (Custom), as the sheet's picker computes it.
@@ -423,16 +472,16 @@ impl EditorSession {
 
     /// The Canvas Size sheet's starting draft for the open document, nil without one.
     pub fn canvas_size_draft(&self) -> Option<CanvasSizeDraft> {
-        self.document
-            .as_ref()
-            .map(|document| CanvasSizeDraft::new(document.width, document.height, document.resolution))
+        self.document.as_ref().map(|document| {
+            CanvasSizeDraft::new(document.width, document.height, document.resolution)
+        })
     }
 
     /// The Image Size sheet's starting options for the open document, nil without one.
     pub fn image_size_options(&self) -> Option<ImageSizeOptions> {
-        self.document
-            .as_ref()
-            .map(|document| ImageSizeOptions::new(document.width, document.height, document.resolution))
+        self.document.as_ref().map(|document| {
+            ImageSizeOptions::new(document.width, document.height, document.resolution)
+        })
     }
 
     /// Image > Trim… (`ImageTrim.trim` + `EditorSession.trim(options:)`).
@@ -452,16 +501,17 @@ impl EditorSession {
         };
         self.is_project_busy = true;
         let raster = self.rendered_document(&document);
-        let result: Result<Option<CanvasDocument>, ProjectError> = match calculate_trim_rect(&raster, options) {
-            None => Ok(None),
-            Some(rect) => {
-                if trim_is_noop(rect, document.width, document.height) {
-                    Ok(Some(document.clone()))
-                } else {
-                    CanvasResizer::resize(&document, &trim_canvas_options(rect)).map(Some)
+        let result: Result<Option<CanvasDocument>, ProjectError> =
+            match calculate_trim_rect(&raster, options) {
+                None => Ok(None),
+                Some(rect) => {
+                    if trim_is_noop(rect, document.width, document.height) {
+                        Ok(Some(document.clone()))
+                    } else {
+                        CanvasResizer::resize(&document, &trim_canvas_options(rect)).map(Some)
+                    }
                 }
-            }
-        };
+            };
         self.is_project_busy = false;
         match result? {
             None => Ok(false),
@@ -507,7 +557,9 @@ impl EditorSession {
             let size = document.size();
             for layer in document.layers.iter_mut() {
                 layer.transform = layer.transform.mirrored(horizontally, axis);
-                if let Some(placement) = layer.mask.as_mut().and_then(|mask| mask.placement.as_mut()) {
+                if let Some(placement) =
+                    layer.mask.as_mut().and_then(|mask| mask.placement.as_mut())
+                {
                     *placement = placement.mirrored(horizontally, axis);
                 }
             }
@@ -593,7 +645,11 @@ mod tests {
         };
         let resized = CanvasResizer::resize(&document, &options).expect("grows");
         assert_eq!(resized.guides[0].position, 2.0);
-        assert_eq!(resized.layers.len(), 1, "a transparent extension adds no layer");
+        assert_eq!(
+            resized.layers.len(),
+            1,
+            "a transparent extension adds no layer"
+        );
         assert_eq!(resized.layers[0].transform.origin, Point::new(1.0, 1.0));
     }
 
@@ -611,9 +667,19 @@ mod tests {
         assert_eq!(layer.name, "Canvas Extension");
         assert_eq!(layer.transform.origin, Point::ZERO);
         assert_eq!(layer.transform.size, Size::new(12.0, 12.0));
-        let image = layer.asset.as_ref().expect("pixels").image.as_rgba().expect("rgba");
+        let image = layer
+            .asset
+            .as_ref()
+            .expect("pixels")
+            .image
+            .as_rgba()
+            .expect("rgba");
         assert_eq!((image.width(), image.height()), (12, 12));
-        assert_eq!(image.get(0, 0), [255, 0, 0, 255], "the added area is the fill color");
+        assert_eq!(
+            image.get(0, 0),
+            [255, 0, 0, 255],
+            "the added area is the fill color"
+        );
         // The 8×8 canvas sat at (2, 2): its area, holes included, is cleared.
         assert_eq!(image.get(5, 5), [0, 0, 0, 0]);
         assert_eq!(image.get(11, 11), [255, 0, 0, 255]);
@@ -637,7 +703,13 @@ mod tests {
         let layer = &resized.layers[0];
         assert_eq!(layer.transform.origin, Point::new(20.0, 20.0));
         assert_eq!(layer.transform.size, Size::new(20.0, 20.0));
-        let image = layer.asset.as_ref().expect("pixels").image.as_rgba().expect("rgba");
+        let image = layer
+            .asset
+            .as_ref()
+            .expect("pixels")
+            .image
+            .as_rgba()
+            .expect("rgba");
         assert_eq!((image.width(), image.height()), (20, 20));
         assert_eq!(layer.asset.as_ref().unwrap().name, "Layer");
     }
@@ -654,7 +726,13 @@ mod tests {
         assert_eq!(resized.resolution, 300.0);
         assert_eq!(resized.layers[0].transform, document.layers[0].transform);
         assert_eq!(resized.guides[0].position, 25.0);
-        assert!(resized.layers[0].asset.as_ref().unwrap().image.as_rgba().is_some());
+        assert!(resized.layers[0]
+            .asset
+            .as_ref()
+            .unwrap()
+            .image
+            .as_rgba()
+            .is_some());
     }
 
     #[test]
@@ -667,7 +745,34 @@ mod tests {
         let resized = ImageResizer::resize(&document, &options).expect("grows");
         // A uniform mask keeps its pixels, not a canvas-sized copy.
         let mask = resized.layers[0].mask.as_ref().expect("mask");
-        assert_eq!((mask.asset.image.width(), mask.asset.image.height()), (1, 1));
+        assert_eq!(
+            (mask.asset.image.width(), mask.asset.image.height()),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn image_size_maps_mask_placements_to_the_new_canvas_scale() {
+        // A placement at document (10, 10) over a 100×100 canvas must move to (20, 10) when the
+        // canvas doubles only in x. The Swift composes the placement map first and the canvas
+        // scale after (`.concatenating`, receiver-first); the reversed chain would leave the
+        // origin at (10, 10).
+        let mut document = CanvasDocument::new(100, 100);
+        let mut layer = layer_at(0.0, 0.0, 10, 10);
+        let mut mask = Mask::solid(true).expect("a 1×1 reveal mask");
+        mask.placement = Some(LayerTransform {
+            origin: Point::new(10.0, 10.0),
+            size: Size::new(4.0, 6.0),
+            ..Default::default()
+        });
+        layer.mask = Some(mask);
+        document.layers = vec![layer];
+        let options = ImageSizeOptions::new(200, 100, 72.0);
+        let resized = ImageResizer::resize(&document, &options).expect("grows in x only");
+        let mask = resized.layers[0].mask.as_ref().expect("mask");
+        let placement = mask.placement.expect("kept placement");
+        assert_eq!(placement.origin, Point::new(20.0, 10.0));
+        assert_eq!(placement.size, Size::new(8.0, 6.0));
     }
 
     /// A raster with an opaque block on a transparent field.
@@ -679,6 +784,24 @@ mod tests {
             }
         }
         image
+    }
+
+    #[test]
+    fn trim_edge_switches_keep_the_sides_they_leave_out() {
+        let raster = block_raster(10, 10, Rect::new(3.0, 4.0, 2.0, 2.0));
+        let cases = [
+            ((true, true, true, true), Some(Rect::new(3.0, 4.0, 2.0, 2.0))),
+            ((false, true, true, true), Some(Rect::new(3.0, 0.0, 2.0, 6.0))),
+            ((true, false, true, true), Some(Rect::new(3.0, 4.0, 2.0, 6.0))),
+            ((true, true, false, true), Some(Rect::new(0.0, 4.0, 5.0, 2.0))),
+            ((true, true, true, false), Some(Rect::new(3.0, 4.0, 7.0, 2.0))),
+            // No edge enabled: nothing to trim at all.
+            ((false, false, false, false), None),
+        ];
+        for ((top, bottom, left, right), expected) in cases {
+            let options = TrimOptions::new(TrimBasedOn::TransparentPixels, top, bottom, left, right, 0);
+            assert_eq!(calculate_trim_rect(&raster, &options), expected, "{options:?}");
+        }
     }
 
     #[test]
@@ -708,7 +831,10 @@ mod tests {
         let rect = calculate_trim_rect(&raster, &options).expect("content");
         assert_eq!(rect, Rect::new(3.0, 3.0, 1.0, 1.0));
         // One solid color leaves nothing.
-        assert_eq!(calculate_trim_rect(&Rgba8Image::opaque(6, 6, [0, 0, 255, 255]), &options), None);
+        assert_eq!(
+            calculate_trim_rect(&Rgba8Image::opaque(6, 6, [0, 0, 255, 255]), &options),
+            None
+        );
     }
 
     #[test]
@@ -753,7 +879,10 @@ mod tests {
         assert_eq!((all[6].width, all[6].height), (3456, 2234));
         assert_eq!(all[11].title, "YouTube Thumb");
         assert_eq!((all[11].width, all[11].height), (1080, 608));
-        assert_eq!(CanvasPreset::matching(1080, 1080).unwrap().title, "Instagram Square");
+        assert_eq!(
+            CanvasPreset::matching(1080, 1080).unwrap().title,
+            "Instagram Square"
+        );
         assert_eq!(CanvasPreset::matching(1000, 1000), None);
         assert_eq!(CanvasPreset::GROUPS.len(), 3);
         assert_eq!(CanvasPreset::GROUPS[1].len(), 5);
@@ -822,7 +951,8 @@ mod tests {
         assert!(!session.history.can_undo());
         // The same id is installed, one undo step, and the view fits the new size.
         let current = session.document.as_ref().unwrap();
-        let same = CanvasDocument::with_id(current.id, 40, 20, current.layers.clone(), 72.0, Vec::new());
+        let same =
+            CanvasDocument::with_id(current.id, 40, 20, current.layers.clone(), 72.0, Vec::new());
         session.apply_document_size(same, "Canvas Size");
         assert_eq!(session.document.as_ref().unwrap().width, 40);
         assert_eq!(session.history.undo_name(), "Canvas Size");
@@ -837,15 +967,20 @@ mod tests {
             30.0,
         )];
         session.document.as_mut().unwrap().selection =
-            Some(compositor_core::selection::DocumentSelection::new(Path::rect(Rect::new(
-                10.0, 5.0, 20.0, 10.0,
-            ))));
+            Some(compositor_core::selection::DocumentSelection::new(
+                Path::rect(Rect::new(10.0, 5.0, 20.0, 10.0)),
+            ));
         session.flip_canvas(true);
         let document = session.document.as_ref().expect("document");
         assert_eq!(document.layers[0].transform.origin, Point::new(80.0, 5.0));
         assert!(document.layers[0].transform.flip_x);
         assert_eq!(document.guides[0].position, 70.0);
-        let bounds = document.selection.as_ref().expect("selection").path.bounding_box();
+        let bounds = document
+            .selection
+            .as_ref()
+            .expect("selection")
+            .path
+            .bounding_box();
         assert_eq!(bounds, Rect::new(70.0, 5.0, 20.0, 10.0));
         assert_eq!(session.history.undo_name(), "Flip Canvas Horizontal");
 
