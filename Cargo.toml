@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/compositor-core",
-    "crates/compositor-pixels",
-    "crates/compositor-render",
-    "crates/compositor-session",
-    "crates/compositor-io",
-    "crates/compositor-ui",
-    "crates/compositor-app",
+    "crates/compositor-rs-core",
+    "crates/compositor-rs-pixels",
+    "crates/compositor-rs-render",
+    "crates/compositor-rs-session",
+    "crates/compositor-rs-io",
+    "crates/compositor-rs-ui",
+    "crates/compositor-rs",
 ]
 
 [workspace.package]
@@ -18,13 +18,13 @@ license = "MIT"
 repository = "https://github.com/robbietilton/Compositor"
 
 [workspace.dependencies]
-compositor-core = { path = "crates/compositor-core" }
-compositor-pixels = { path = "crates/compositor-pixels" }
-compositor-render = { path = "crates/compositor-render" }
-compositor-session = { path = "crates/compositor-session" }
-compositor-io = { path = "crates/compositor-io" }
-compositor-ui = { path = "crates/compositor-ui" }
-compositor-app = { path = "crates/compositor-app" }
+compositor-rs-core = { path = "crates/compositor-rs-core" }
+compositor-rs-pixels = { path = "crates/compositor-rs-pixels" }
+compositor-rs-render = { path = "crates/compositor-rs-render" }
+compositor-rs-session = { path = "crates/compositor-rs-session" }
+compositor-rs-io = { path = "crates/compositor-rs-io" }
+compositor-rs-ui = { path = "crates/compositor-rs-ui" }
+compositor-rs = { path = "crates/compositor-rs" }
 
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 serde = { version = "1", features = ["derive"] }

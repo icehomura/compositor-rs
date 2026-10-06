@@ -1,0 +1,18 @@
+[package]
+name = "compositor-rs-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compositor-rs-core.workspace = true
+compositor-rs-pixels.workspace = true
+compositor-rs-render.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+rustc-hash.workspace = true

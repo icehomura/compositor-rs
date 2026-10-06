@@ -1,0 +1,24 @@
+[package]
+name = "compositor-rs-ui"
+description = "The Compositor editor's gpui interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compositor-rs-core.workspace = true
+compositor-rs-pixels.workspace = true
+compositor-rs-render.workspace = true
+compositor-rs-session.workspace = true
+compositor-rs-io.workspace = true
+gpui-kit = "0.7"
+rustc-hash.workspace = true
+parking_lot.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+gpui-kit = { version = "0.7", features = ["test-support"] }

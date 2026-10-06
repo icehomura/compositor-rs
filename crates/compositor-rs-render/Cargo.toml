@@ -1,0 +1,15 @@
+[package]
+name = "compositor-rs-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compositor-rs-core.workspace = true
+compositor-rs-pixels.workspace = true
+rayon.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+rustc-hash.workspace = true
