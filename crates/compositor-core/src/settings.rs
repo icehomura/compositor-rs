@@ -133,6 +133,23 @@ pub fn set_string(value: &str, key: &str) {
     persist();
 }
 
+/// The stored value as-is, for the settings that keep a structure rather than one switch: the keyboard
+/// shortcuts' override map, say.
+pub fn json_value(key: &str) -> Option<Value> {
+    if is_testing() {
+        return None;
+    }
+    STORE.read().get(&key_of(key)).cloned()
+}
+
+pub fn set_json(value: Value, key: &str) {
+    if is_testing() {
+        return;
+    }
+    STORE.write().insert(key_of(key), value);
+    persist();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
