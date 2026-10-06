@@ -193,9 +193,11 @@ impl LayerTransform {
             return moved;
         }
         self.placing(
+            // Swift's `A.concatenating(B)` reads receiver-first, which is `then` here:
+            // `concatenating` would compose the three maps the other way round.
             self.unit_to_document()
-                .concatenating(old.unit_to_document().inverted())
-                .concatenating(new.unit_to_document()),
+                .then(old.unit_to_document().inverted())
+                .then(new.unit_to_document()),
         )
     }
 
@@ -486,7 +488,9 @@ fn shift_to(guides: &[f64], targets: &[f64], tolerance: f64) -> (f64, Option<f64
     for guide_value in guides {
         for target in targets {
             let movement = target - guide_value;
-            if movement.abs() > tolerance {
+            // `guard abs(move) <= tolerance else { continue }`: written as the Swift writes it, so a
+            // NaN target is out of reach rather than winning the comparison.
+            if !(movement.abs() <= tolerance) {
                 continue;
             }
             if let Some(current) = best {
@@ -814,6 +818,102 @@ mod tests {
         // A size past the limits falls back to the original rather than an invalid draft.
         let too_big = resize_drag.updated(Point::new(400_000.0, 400_000.0), false, false, false);
         assert_eq!(too_big, original);
+    }
+
+    #[test]
+    fn rotated_resize_keeps_opposite_anchor_at_every_handle() {
+        // Ported from CompositorTests.TransformTests.rotatedResizeKeepsOppositeAnchorAtEveryHandle.
+        let original = LayerTransform {
+            origin: Point::new(31.0, -19.0),
+            size: Size::new(200.0, 100.0),
+            rotation: 37.0,
+            ..Default::default()
+        };
+        for (index, handle) in LayerTransform::HANDLES.iter().enumerate() {
+            let opposite = Point::new(1.0 - handle.x, 1.0 - handle.y);
+            let start = original.point(*handle);
+            let drag = TransformDrag {
+                original,
+                start,
+                mode: TransformDragMode::Resize(index),
+                original_corners: None,
+            };
+            for locked in [true, false] {
+                let changed = drag.updated(Point::new(start.x + 34.0, start.y + 17.0), locked, false, false);
+                let anchor = original.point(opposite);
+                let after = changed.point(opposite);
+                assert!(
+                    (anchor.x - after.x).abs() < 0.0001 && (anchor.y - after.y).abs() < 0.0001,
+                    "handle {index} moved the opposite corner {anchor:?} to {after:?}"
+                );
+                if locked {
+                    assert!(
+                        (changed.size.width / changed.size.height - 2.0).abs() < 0.0001,
+                        "handle {index} lost the locked 2:1 ratio"
+                    );
+                }
+                assert!(changed.is_valid(), "handle {index} left an invalid transform");
+            }
+        }
+    }
+
+    #[test]
+    fn move_rotate_and_shift_constraints() {
+        // Ported from CompositorTests.TransformTests.moveRotateAndShiftConstraints.
+        let original = LayerTransform {
+            origin: Point::ZERO,
+            size: Size::new(100.0, 50.0),
+            ..Default::default()
+        };
+        let move_drag = TransformDrag {
+            original,
+            start: Point::new(40.0, 20.0),
+            mode: TransformDragMode::Move,
+            original_corners: None,
+        };
+        let moved = move_drag.updated(Point::new(60.0, 25.0), true, true, false);
+        assert_eq!(moved.origin, Point::new(20.0, 0.0), "shift pins the smaller axis");
+
+        let rotate = TransformDrag {
+            original,
+            start: Point::new(100.0, 25.0),
+            mode: TransformDragMode::Rotate,
+            original_corners: None,
+        };
+        let rotated = rotate.updated(Point::new(50.0, 75.0), true, false, false);
+        assert!((rotated.rotation - 90.0).abs() < 0.0001, "a quarter turn: {}", rotated.rotation);
+        let (before, after) = (original.center(), rotated.center());
+        assert!((before.x - after.x).abs() < 0.0001 && (before.y - after.y).abs() < 0.0001, "the center stays put");
+        let snapped = rotate.updated(Point::new(99.0, 45.0), true, true, false);
+        assert_eq!(snapped.rotation % 15.0, 0.0, "shift snaps to 15°: {}", snapped.rotation);
+
+        let resize = TransformDrag {
+            original,
+            start: Point::new(100.0, 50.0),
+            mode: TransformDragMode::Resize(4),
+            original_corners: None,
+        };
+        let free = resize.updated(Point::new(150.0, 50.0), true, true, false);
+        assert_eq!(free.size, Size::new(150.0, 50.0), "shift cancels the ratio lock, so this drag resizes freely");
+    }
+
+    #[test]
+    fn scale_percent_sets_both_sides_about_the_center() {
+        // Ported from CompositorTests.TransformTests.scalePercentSetsBothSidesAboutTheCenter.
+        let pixels = Size::new(400.0, 200.0);
+        let stretched = LayerTransform {
+            origin: Point::ZERO,
+            size: Size::new(pixels.width * 2.0, pixels.height * 3.0),
+            rotation: 30.0,
+            ..Default::default()
+        };
+        assert_eq!(stretched.scale_percent(pixels), 200.0, "percent reads the width");
+        let scaled = stretched.scaled(50.0, pixels);
+        assert_eq!(scaled.size, Size::new(pixels.width / 2.0, pixels.height / 2.0));
+        let (before, after) = (stretched.center(), scaled.center());
+        assert!((before.x - after.x).abs() < 0.001 && (before.y - after.y).abs() < 0.001, "the center stays put");
+        assert_eq!(scaled.rotation, 30.0);
+        assert_eq!(scaled.scale_percent(pixels), 50.0);
     }
 
     #[test]
