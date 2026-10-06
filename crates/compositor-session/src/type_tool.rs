@@ -525,17 +525,17 @@ mod tests {
     /// A dragged-out box must be at least 16 pixels on a side, and is refused past the limits.
     #[test]
     fn paragraph_boxes_are_clamped_and_refused() {
-        let mut session = session();
-        session.begin_text_in(Rect::new(4.0, 5.0, 4.0, 3.0));
-        let draft = session.text_draft.as_ref().expect("a draft");
+        let mut boxed = session();
+        boxed.begin_text_in(Rect::new(4.0, 5.0, 4.0, 3.0));
+        let draft = boxed.text_draft.as_ref().expect("a draft");
         assert_eq!(draft.origin, Point::new(4.0, 5.0));
         assert_eq!(draft.style.box_size, Some(Size::new(16.0, 16.0)));
 
-        let mut session = session();
-        session.begin_text_in(Rect::new(0.0, 0.0, 40_000.0, 20.0));
-        assert!(session.text_draft.is_none());
+        let mut refused = session();
+        refused.begin_text_in(Rect::new(0.0, 0.0, 40_000.0, 20.0));
+        assert!(refused.text_draft.is_none());
         assert_eq!(
-            session.brush_error.as_deref(),
+            refused.brush_error.as_deref(),
             Some("That text box exceeds the 30,000-pixel or 200-megapixel limit.")
         );
     }
