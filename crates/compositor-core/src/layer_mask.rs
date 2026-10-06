@@ -188,7 +188,8 @@ impl LayerMask {
     ) -> AffineTransform {
         let placement_map = crate::layer_transform::pixel_to_document(placement, mask_width, mask_height);
         let layer_map = crate::layer_transform::pixel_to_document(layer, width, height);
-        placement_map.concatenating(layer_map.inverted())
+        // Swift `A.concatenating(B)` runs the receiver first, which is `then` here.
+        placement_map.then(layer_map.inverted())
     }
 }
 
@@ -373,6 +374,57 @@ mod tests {
         let mut new = old;
         new.origin = Point::new(20.0, 30.0);
         assert_eq!(mask.placement_moving_layer(&old, &new), None);
+    }
+
+    #[test]
+    fn placement_in_layer_maps_the_mask_grid_through_the_layers_grid() {
+        // The mask's document map runs first, then the layer grid's inverse (Swift's receiver-first
+        // `concatenating`). The grids scale differently from the document per axis, so composing in
+        // the other order lands the same mask pixel somewhere else.
+        let layer = LayerTransform {
+            origin: Point::ZERO,
+            size: Size::new(200.0, 100.0),
+            ..Default::default()
+        };
+        let placement = LayerTransform {
+            origin: Point::new(10.0, 20.0),
+            size: Size::new(200.0, 100.0),
+            ..Default::default()
+        };
+        let map = LayerMask::placement_in_layer(&layer, &placement, 100, 50, 100, 50);
+        // The mask grid's centre lands on document (110, 70), which the layer's 100×50 grid reads
+        // as (55, 35). The reversed chain would give (60, 45).
+        let mapped = map.applying(Point::new(50.0, 25.0));
+        assert!((mapped.x - 55.0).abs() < 1e-9, "x was {}", mapped.x);
+        assert!((mapped.y - 35.0).abs() < 1e-9, "y was {}", mapped.y);
+    }
+
+    #[test]
+    fn a_linked_mask_moves_with_its_layer_whichever_thumbnail_is_selected() {
+        // Ported from CompositorTests.MaskTransformTests.aLinkedMaskMovesWithItsLayerWhicheverThumbnailIsSelected
+        // and LayerMaskTests.addDisableDeleteUndoAndTargetSelection: a fresh mask is enabled and linked.
+        let mask = LayerMask::new(gray(8, 8, 255));
+        assert!(mask.is_enabled, "a fresh mask shows through");
+        assert!(mask.is_linked, "a fresh mask moves with its layer");
+        assert_eq!(mask.placement, None, "a linked mask has no placement of its own");
+        assert_eq!(mask.enabled_image().map(|image| image.width()), Some(8));
+
+        let old = LayerTransform {
+            origin: Point::new(10.0, 10.0),
+            size: Size::new(8.0, 8.0),
+            ..Default::default()
+        };
+        let mut moved = old;
+        moved.origin = Point::new(50.0, 10.0);
+        assert_eq!(
+            mask.placement_moving_layer(&old, &moved),
+            None,
+            "a linked mask keeps covering its layer instead of taking a placement"
+        );
+
+        let solid = LayerMask::solid(false).unwrap();
+        assert!(solid.is_enabled && solid.is_linked && solid.placement.is_none());
+        assert_eq!(solid.enabled_image().map(|image| image.width()), Some(1), "and stays one pixel");
     }
 
     #[test]
