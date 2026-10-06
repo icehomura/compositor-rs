@@ -9,7 +9,9 @@
 use std::collections::HashSet;
 
 use compositor_core::geom::{Point, Rect, Size};
-use compositor_core::layer_transform::{LayerTransform, TransformDrag, TransformDragMode, TransformSnap};
+use compositor_core::layer_transform::{
+    LayerTransform, TransformDrag, TransformDragMode, TransformSnap,
+};
 use compositor_core::limits::MAX_SIDE_EXTENT;
 use compositor_core::viewport::CanvasViewport;
 use compositor_core::Id;
@@ -174,7 +176,8 @@ impl CropSnap {
                     edges
                         .iter()
                         .filter_map(|&edge| {
-                            CropSnap::nearest(edge, targets, self.tolerance).map(|target| target - edge)
+                            CropSnap::nearest(edge, targets, self.tolerance)
+                                .map(|target| target - edge)
                         })
                         .min_by(|a, b| a.abs().total_cmp(&b.abs()))
                         .unwrap_or(0.0)
@@ -404,7 +407,8 @@ impl EditorSession {
             TransformDragMode::Resize(index) => Some(index),
             _ => None,
         };
-        let Some(index) = resize_index.filter(|_| self.snapping_enabled && drag.original.radians() == 0.0)
+        let Some(index) =
+            resize_index.filter(|_| self.snapping_enabled && drag.original.radians() == 0.0)
         else {
             self.snap_guides = (Vec::new(), Vec::new());
             return point;
@@ -413,7 +417,10 @@ impl EditorSession {
         let targets = self.transform_snap_targets(moving);
         let grab = drag.original.point(handle);
         // Where the dragged handle is, to tell its edge from the one across from it.
-        let at = Point::new(grab.x + point.x - drag.start.x, grab.y + point.y - drag.start.y);
+        let at = Point::new(
+            grab.x + point.x - drag.start.x,
+            grab.y + point.y - drag.start.y,
+        );
         let edge = |transform: &LayerTransform, horizontal: bool| -> f64 {
             let box_ = Rect::from_origin_size(transform.origin, transform.size);
             if horizontal {
@@ -481,8 +488,16 @@ impl EditorSession {
             }
         }
         self.snap_guides = (
-            snaps.iter().filter(|snap| snap.0).map(|snap| snap.1).collect(),
-            snaps.iter().filter(|snap| !snap.0).map(|snap| snap.1).collect(),
+            snaps
+                .iter()
+                .filter(|snap| snap.0)
+                .map(|snap| snap.1)
+                .collect(),
+            snaps
+                .iter()
+                .filter(|snap| !snap.0)
+                .map(|snap| snap.1)
+                .collect(),
         );
         result
     }
@@ -521,7 +536,11 @@ impl EditorSession {
         horizontal: bool,
         vertical: bool,
     ) -> Size {
-        let Some(origin) = self.selection_move_origin.clone().filter(|_| self.snapping_enabled) else {
+        let Some(origin) = self
+            .selection_move_origin
+            .clone()
+            .filter(|_| self.snapping_enabled)
+        else {
             self.snap_guides = (Vec::new(), Vec::new());
             return offset;
         };
@@ -555,8 +574,9 @@ impl EditorSession {
             return None;
         }
         Some(
-            self.crop_rect
-                .unwrap_or_else(|| Rect::new(0.0, 0.0, document.size().width, document.size().height)),
+            self.crop_rect.unwrap_or_else(|| {
+                Rect::new(0.0, 0.0, document.size().width, document.size().height)
+            }),
         )
     }
 
@@ -595,7 +615,13 @@ impl EditorSession {
             .selection
             .as_ref()
             .filter(|selection| !selection.is_empty())
-            .map(|selection| selection.path.bounding_box().integral().intersection(canvas));
+            .map(|selection| {
+                selection
+                    .path
+                    .bounding_box()
+                    .integral()
+                    .intersection(canvas)
+            });
         self.crop_ratio_choice = "Free".to_string();
         self.crop_rect = Some(match selection_bounds {
             Some(bounds) if CropGeometry::valid(bounds) => bounds,
@@ -694,23 +720,48 @@ mod tests {
     #[test]
     fn create_with_a_ratio_grows_the_shorter_axis() {
         // 4:3 — a wide drag keeps dy as the y it was, the y axis grows to dx / (4/3).
-        let rect = CropGeometry::create(Point::new(0.0, 0.0), Point::new(80.0, 10.0), Some(4.0 / 3.0), false);
+        let rect = CropGeometry::create(
+            Point::new(0.0, 0.0),
+            Point::new(80.0, 10.0),
+            Some(4.0 / 3.0),
+            false,
+        );
         close(rect.width(), 80.0);
         close(rect.height(), 60.0);
         // 3:4 — the tall choice mirrors it.
-        let rect = CropGeometry::create(Point::new(0.0, 0.0), Point::new(30.0, 80.0), Some(3.0 / 4.0), false);
+        let rect = CropGeometry::create(
+            Point::new(0.0, 0.0),
+            Point::new(30.0, 80.0),
+            Some(3.0 / 4.0),
+            false,
+        );
         close(rect.width(), 60.0);
         close(rect.height(), 80.0);
         // 9:16 — portrait.
-        let rect = CropGeometry::create(Point::new(0.0, 0.0), Point::new(90.0, 160.0), Some(9.0 / 16.0), false);
+        let rect = CropGeometry::create(
+            Point::new(0.0, 0.0),
+            Point::new(90.0, 160.0),
+            Some(9.0 / 16.0),
+            false,
+        );
         close(rect.width(), 90.0);
         close(rect.height(), 160.0);
         // 9:16 from a wide drag grows the height.
-        let rect = CropGeometry::create(Point::new(0.0, 0.0), Point::new(90.0, 10.0), Some(9.0 / 16.0), false);
+        let rect = CropGeometry::create(
+            Point::new(0.0, 0.0),
+            Point::new(90.0, 10.0),
+            Some(9.0 / 16.0),
+            false,
+        );
         close(rect.width(), 90.0);
         close(rect.height(), 160.0);
         // Dragged up-left, the ratio holds and the box stays where it was dragged.
-        let rect = CropGeometry::create(Point::new(100.0, 100.0), Point::new(40.0, 95.0), Some(4.0 / 3.0), false);
+        let rect = CropGeometry::create(
+            Point::new(100.0, 100.0),
+            Point::new(40.0, 95.0),
+            Some(4.0 / 3.0),
+            false,
+        );
         close(rect.width(), 60.0);
         close(rect.height(), 45.0);
         assert_eq!(rect.min_x(), 40.0);
@@ -719,17 +770,29 @@ mod tests {
 
     #[test]
     fn create_symmetric_grows_out_from_the_start_as_its_center() {
-        let rect = CropGeometry::create(Point::new(100.5, 100.5), Point::new(120.2, 130.1), None, true);
-        assert_eq!(rect, Rect::new(80.0, 70.0, 40.0, 60.0));
-        close(rect.mid_x(), 100.0);
-        close(rect.mid_y(), 100.0);
+        let rect = CropGeometry::create(
+            Point::new(100.5, 100.5),
+            Point::new(120.2, 130.1),
+            None,
+            true,
+        );
+        // Crop.swift:5-9 rounds each edge of the symmetric frame (Crop.swift:22-23): the snapped
+        // rect keeps its centre exactly on the start point after rounding.
+        assert_eq!(rect, Rect::new(81.0, 71.0, 39.0, 59.0));
+        close(rect.mid_x(), 100.5);
+        close(rect.mid_y(), 100.5);
     }
 
     #[test]
     fn valid_holds_the_side_limit_and_finite_numbers() {
         assert!(CropGeometry::valid(Rect::new(0.0, 0.0, 1.0, 1.0)));
         assert!(!CropGeometry::valid(Rect::new(0.0, 0.0, 0.5, 1.0)));
-        assert!(!CropGeometry::valid(Rect::new(0.0, 0.0, MAX_SIDE_EXTENT + 1.0, 1.0)));
+        assert!(!CropGeometry::valid(Rect::new(
+            0.0,
+            0.0,
+            MAX_SIDE_EXTENT + 1.0,
+            1.0
+        )));
         assert!(!CropGeometry::valid(Rect::new(0.0, 0.0, f64::NAN, 1.0)));
         assert!(!CropGeometry::valid(Rect::new(1_000_001.0, 0.0, 1.0, 1.0)));
     }
@@ -779,9 +842,25 @@ mod tests {
             original: rect,
             mode: CropDragMode::Create,
         };
-        assert_eq!(target_snap().apply(rect, &drag, Point::new(136.0, 40.0), Some(1.0), false), rect);
-        let snapped = target_snap().apply(rect, &drag, Point::new(136.0, 40.0), None, false);
-        assert_eq!(snapped, Rect::new(96.0, 0.0, 4.0, 40.0));
+        assert_eq!(
+            target_snap().apply(rect, &drag, Point::new(136.0, 40.0), Some(1.0), false),
+            rect
+        );
+        // Without a ratio the dragged corner snaps while the anchor stays put
+        // (CropTests.swift:89,109-113): right edge 147 -> 150, bottom edge 77 -> 80.
+        let snap = CropSnap::new(
+            vec![0.0, 200.0, 50.0, 150.0],
+            vec![0.0, 100.0, 20.0, 80.0],
+            6.0,
+        );
+        let create = CropDrag {
+            start: Point::new(52.0, 18.0),
+            original: Rect::new(0.0, 0.0, 0.0, 0.0),
+            mode: CropDragMode::Create,
+        };
+        let dragged = Point::new(147.0, 77.0);
+        let snapped = snap.apply(create.updated(dragged, None, false), &create, dragged, None, false);
+        assert_eq!(snapped, Rect::new(52.0, 18.0, 98.0, 62.0));
     }
 
     #[test]
@@ -792,7 +871,13 @@ mod tests {
             mode: CropDragMode::Resize(6),
         };
         // The top-left corner is dragged near x = 0: its x snaps, the right edge does not stay.
-        let rect = target_snap().apply(Rect::new(3.0, 3.0, 43.0, 43.0), &drag, Point::new(3.0, 3.0), None, false);
+        let rect = target_snap().apply(
+            Rect::new(3.0, 3.0, 43.0, 43.0),
+            &drag,
+            Point::new(3.0, 3.0),
+            None,
+            false,
+        );
         assert_eq!(rect, Rect::new(0.0, 0.0, 46.0, 46.0));
         // An edge handle only moves its own axis.
         let edge = CropDrag {
@@ -800,8 +885,16 @@ mod tests {
             original: Rect::new(0.0, 0.0, 40.0, 40.0),
             mode: CropDragMode::Resize(1),
         };
-        let rect = target_snap().apply(Rect::new(0.0, 2.0, 40.0, 42.0), &edge, Point::new(0.0, 2.0), None, false);
-        assert_eq!(rect, Rect::new(0.0, 0.0, 40.0, 42.0));
+        let rect = target_snap().apply(
+            Rect::new(0.0, 2.0, 40.0, 42.0),
+            &edge,
+            Point::new(0.0, 2.0),
+            None,
+            false,
+        );
+        // Handle 1 is the top edge (0.5, 0), so only the y axis snaps (Crop.swift:83):
+        // minY 2 -> 0 while maxY stays at 44 (Crop.swift:92-94), growing the height 42 -> 44.
+        assert_eq!(rect, Rect::new(0.0, 0.0, 40.0, 44.0));
     }
 
     #[test]
@@ -811,7 +904,13 @@ mod tests {
             original: Rect::new(50.0, 100.0, 0.0, 0.0),
             mode: CropDragMode::Create,
         };
-        let rect = target_snap().apply(Rect::new(50.0, 100.0, 48.0, 8.0), &drag, Point::new(98.0, 108.0), None, true);
+        let rect = target_snap().apply(
+            Rect::new(50.0, 100.0, 48.0, 8.0),
+            &drag,
+            Point::new(98.0, 108.0),
+            None,
+            true,
+        );
         // The right edge lands on 100, so the frame spans 0…100 about the 50 start.
         close(rect.min_x(), 0.0);
         close(rect.max_x(), 100.0);
@@ -848,7 +947,11 @@ mod tests {
     fn session_with_document(width: usize, height: usize) -> EditorSession {
         let mut session = EditorSession::default();
         let mut document = compositor_core::document::CanvasDocument::new(width, height);
-        let raster = std::sync::Arc::new(compositor_core::buffer::Rgba8Image::opaque(width, height, [1, 2, 3, 255]));
+        let raster = std::sync::Arc::new(compositor_core::buffer::Rgba8Image::opaque(
+            width,
+            height,
+            [1, 2, 3, 255],
+        ));
         let asset = compositor_core::imported_image::ImportedImage::new(
             compositor_core::imported_image::PixelImage::Rgba(raster.clone()),
             compositor_core::imported_image::PixelImage::Rgba(raster),
@@ -882,12 +985,15 @@ mod tests {
     #[test]
     fn changing_the_ratio_keeps_the_width_and_recenters_the_height() {
         let mut session = session_with_document(1600, 900);
+        // visibleCropRect is nil until the Crop tool is active (Crop.swift:214-216).
+        session.tool = compositor_core::document::NavigationTool::Crop;
         session.crop_rect = Some(Rect::new(100.0, 200.0, 400.0, 300.0));
         session.crop_ratio_choice = "3:4".to_string();
         session.change_crop_ratio();
         let rect = session.crop_rect.expect("changed");
         close(rect.width(), 400.0);
-        close(rect.height(), 400.0 / (3.0 / 4.0));
+        // changeCropRatio snaps to whole pixels (Crop.swift:233): 533⅓ rounds to 534.
+        close(rect.height(), 534.0);
         close(rect.mid_y(), 350.0);
         assert_eq!(rect.min_x(), 100.0);
     }
@@ -898,9 +1004,9 @@ mod tests {
         let mut session = session_with_document(100, 80);
         session.tool = compositor_core::document::NavigationTool::Move;
         session.document.as_mut().unwrap().selection =
-            Some(compositor_core::selection::DocumentSelection::new(Path::rect(Rect::new(
-                10.25, 20.5, 30.0, 40.0,
-            ))));
+            Some(compositor_core::selection::DocumentSelection::new(
+                Path::rect(Rect::new(10.25, 20.5, 30.0, 40.0)),
+            ));
         session.start_crop_tool();
         // The bounds are made whole-pixel, intersected with the canvas.
         assert_eq!(session.crop_rect, Some(Rect::new(10.0, 20.0, 31.0, 41.0)));
