@@ -9,3 +9,5 @@ pub mod adjustment_surface;
 pub mod downsample_cache;
 pub mod effects_preview_cache;
 pub mod layer_renderer;
+pub mod live_mask_renderer;
+pub mod tiled_layer_renderer;
