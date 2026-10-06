@@ -66,7 +66,10 @@ static QUEUED_PATHS: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(|| Mutex::new
 
 fn main() {
     env_logger::init();
-    let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // The whole icon catalog, not the generated default subset: the editor draws Lucide icons the
+    // subset leaves out (`lasso`, `crop`, `layers`, `paintbrush`, …) and a missing one renders as
+    // nothing — 68 `could not find asset` errors per run with `Assets`.
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     // `application(_:open:)`: files handed to the running app (a second launch, a drop on the icon).
     application.on_open_urls(|urls| {
         let mut queued = QUEUED_PATHS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
