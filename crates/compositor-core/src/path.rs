@@ -132,8 +132,11 @@ impl Path {
         });
     }
 
-    /// `CGPath.addLines(between:)`: one subpath — a move to the first point, then a line to each
-    /// other point. An empty slice adds nothing; a single point adds just the move.
+    /// `CGPathAddLines` (the SDK header): "Move to the first element of `points' … and append a
+    /// line from each point to the next point in `points'." Like that function, this always starts
+    /// a new subpath at the first point, even when the path already has a current point — it does
+    /// not extend the current subpath (for that, use `add_line`). An empty slice adds nothing; a
+    /// single point adds just the move.
     pub fn add_lines(&mut self, points: &[Point]) {
         let Some((first, rest)) = points.split_first() else {
             return;
@@ -951,6 +954,41 @@ mod tests {
                 "{point:?} is off the ellipse ({value})"
             );
         }
+    }
+
+    #[test]
+    fn add_lines_moves_to_its_first_point_even_with_a_current_point() {
+        // `CGPathAddLines`: "Move to the first element of `points' … and append a line from each
+        // point to the next point in `points'." It never extends the current subpath, so a polyline
+        // that must continue the current point is written as `move_to` + `add_line` per point —
+        // which is also exactly the element stream this produces.
+        let mut path = Path::empty();
+        path.move_to(Point::new(1.0, 1.0));
+        path.add_lines(&[Point::new(4.0, 1.0), Point::new(4.0, 4.0)]);
+        assert_eq!(path.elements().len(), 3);
+        assert_eq!(path.elements()[0], PathElement::MoveTo(Point::new(1.0, 1.0)));
+        assert_eq!(path.elements()[1], PathElement::MoveTo(Point::new(4.0, 1.0)));
+        assert_eq!(path.elements()[2], PathElement::LineTo(Point::new(4.0, 4.0)));
+        let subpaths = flatten(&path, &AffineTransform::IDENTITY);
+        assert_eq!(subpaths.len(), 2);
+        assert_eq!(subpaths[0].points, vec![Point::new(1.0, 1.0)]);
+        assert_eq!(
+            subpaths[1].points,
+            vec![Point::new(4.0, 1.0), Point::new(4.0, 4.0)]
+        );
+
+        // A polyline that must continue the current point is written as `move_to` + `add_line`:
+        // that keeps one subpath, where `add_lines` breaks it at the first point.
+        let mut spelled_out = Path::empty();
+        spelled_out.move_to(Point::new(1.0, 1.0));
+        spelled_out.add_line(Point::new(4.0, 1.0));
+        spelled_out.add_line(Point::new(4.0, 4.0));
+        assert_eq!(spelled_out.elements().len(), 3);
+        assert_eq!(
+            spelled_out.elements()[1],
+            PathElement::LineTo(Point::new(4.0, 1.0))
+        );
+        assert_eq!(flatten(&spelled_out, &AffineTransform::IDENTITY).len(), 1);
     }
 
     #[test]

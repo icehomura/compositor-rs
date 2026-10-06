@@ -119,7 +119,8 @@ pub fn normalized(path: &Path, rule: FillRule) -> Path {
 ///
 /// `transform` is applied to the path before it is stroked, as Core Graphics does, so `width` is in
 /// the transform's output space. A non-finite or non-positive width has no outline: the result is
-/// empty.
+/// empty. Each group's result is already a union of its own contours — outer contours wound
+/// positive, holes negative — so appending the two groups fills as their union.
 pub fn stroking_with_width(
     path: &Path,
     width: f64,
@@ -160,8 +161,8 @@ fn clipper_fill_rule(rule: FillRule) -> ClipperFillRule {
 }
 
 /// Runs `operation` with `a` as the subject and `b` as the clip, and returns its contours as a
-/// polygon path. A failed operation yields an empty path: the callers below fill, clip and stroke
-/// with these, so an empty result is the safe answer.
+/// polygon path. A failed operation yields an empty path: callers fill, clip and stroke with these
+/// paths, so an empty result is the safe answer.
 fn boolean(
     a: &Path,
     b: &Path,
@@ -319,6 +320,26 @@ mod tests {
             .count()
     }
 
+    /// The area the path covers: the shoelace area of every subpath, summed with its sign, so
+    /// holes subtract from the outer contours. Taking the absolute value gives the covered area
+    /// whatever way round Clipper2 winds its outlines.
+    fn covered_area(path: &Path) -> f64 {
+        let mut total = 0.0;
+        for subpath in flatten(path, &AffineTransform::IDENTITY) {
+            let points = &subpath.points;
+            if points.len() < 3 {
+                continue;
+            }
+            let mut doubled = 0.0;
+            for (index, a) in points.iter().enumerate() {
+                let b = points[(index + 1) % points.len()];
+                doubled += a.x * b.y - b.x * a.y;
+            }
+            total += doubled / 2.0;
+        }
+        total.abs()
+    }
+
     #[test]
     fn union_of_two_squares_is_one_square() {
         // Two 20×10 squares sharing the edge y = 10.
@@ -327,6 +348,7 @@ mod tests {
         let joined = union(&top, &bottom, FillRule::Winding);
 
         assert_eq!(joined.bounding_box(), Rect::new(0.0, 0.0, 20.0, 20.0));
+        assert_eq!(covered_area(&joined), 400.0);
         for (x, y) in [
             (0.5, 0.5),
             (19.5, 0.5),
@@ -355,6 +377,7 @@ mod tests {
         let holed = subtracting(&big, &centred, FillRule::Winding);
 
         assert_eq!(holed.bounding_box(), big.bounding_box());
+        assert_eq!(covered_area(&holed), 300.0);
         assert!(!contains(&holed, 10.0, 10.0), "the hole must not be filled");
         assert!(contains(&holed, 2.0, 2.0));
         assert!(contains(&holed, 17.5, 10.0));
@@ -370,6 +393,7 @@ mod tests {
         let overlapping = rect(5.0, 5.0, 10.0, 10.0);
         let overlap = intersection(&a, &overlapping, FillRule::Winding);
         assert_eq!(overlap.bounding_box(), Rect::new(5.0, 5.0, 5.0, 5.0));
+        assert_eq!(covered_area(&overlap), 25.0);
         assert!(contains(&overlap, 7.5, 7.5));
     }
 
@@ -380,6 +404,7 @@ mod tests {
         let either = symmetric_difference(&a, &b, FillRule::Winding);
 
         assert!(!contains(&either, 7.5, 7.5), "the overlap is in both");
+        assert_eq!(covered_area(&either), 150.0);
         assert!(contains(&either, 2.5, 2.5));
         assert!(contains(&either, 12.5, 12.5));
     }
@@ -394,6 +419,7 @@ mod tests {
         // The two subpaths merge into the single 15×15 outline they cover.
         assert_eq!(normalized.bounding_box(), Rect::new(0.0, 0.0, 15.0, 15.0));
         assert_eq!(subpath_count(&normalized), 1);
+        assert_eq!(covered_area(&normalized), 175.0);
 
         // Sampling every half pixel off the boundaries, the coverage is unchanged.
         for i in 0..=40 {
@@ -486,6 +512,8 @@ mod tests {
 
         // Mitered corners reach the half width diagonally; the ends meet, so no cap adds anything.
         assert_eq!(band.bounding_box(), Rect::new(-1.0, -1.0, 12.0, 12.0));
+        // 12×12 outer square less the 8×8 hole the closed outline leaves.
+        assert_eq!(covered_area(&band), 80.0);
         let round = stroking_with_width(&square, 2.0, LineCap::Round, LineJoin::Round, 10.0, None);
         assert_eq!(round.bounding_box(), band.bounding_box());
         assert!(!contains(&round, 5.0, 5.0));
@@ -576,6 +604,9 @@ mod tests {
 
         let expanded = union(&selection, &band, FillRule::Winding);
         assert_eq!(expanded.bounding_box(), Rect::new(5.0, 5.0, 30.0, 30.0));
+        // The 30×30 square less the four corners a radius-5 round join cuts off.
+        let rounded_corner = 25.0 - std::f64::consts::PI * 25.0 / 4.0;
+        assert!((covered_area(&expanded) - (900.0 - 4.0 * rounded_corner)).abs() < 0.5);
         assert!(contains(&expanded, 5.5, 20.0));
         // Round joins round the corners off: the square's own corner would be at (5, 5).
         assert!(!contains(&expanded, 5.5, 5.5));
@@ -583,6 +614,7 @@ mod tests {
 
         let contracted = subtracting(&selection, &band, FillRule::Winding);
         assert_eq!(contracted.bounding_box(), Rect::new(15.0, 15.0, 10.0, 10.0));
+        assert_eq!(covered_area(&contracted), 100.0);
         assert!(contains(&contracted, 20.0, 20.0));
         assert!(!contains(&contracted, 12.0, 20.0));
     }
