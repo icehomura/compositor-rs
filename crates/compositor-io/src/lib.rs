@@ -7,6 +7,7 @@ pub mod project_digest;
 pub mod project_manifest;
 pub mod project_store;
 pub mod project_watcher;
+pub mod psd;
 pub mod recent_projects;
 pub mod resize;
 
