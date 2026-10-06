@@ -5,5 +5,7 @@
 //! `TiledLayerRenderer`); here every path is CPU code over `compositor-pixels` kernels, parallelized with
 //! `rayon`, with the same visuals and the same tile/preview caching behaviour.
 
+pub mod adjustment_surface;
 pub mod downsample_cache;
 pub mod effects_preview_cache;
+pub mod layer_renderer;
