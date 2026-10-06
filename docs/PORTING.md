@@ -49,7 +49,7 @@ Dependency direction (no cycles): `core ← pixels ← render ← session ← io
 | Apple | Rust | Notes |
 |---|---|---|
 | `CGFloat`/`CGPoint`/`CGSize`/`CGRect` | `core::geom::{Point, Size, Rect}` | `CGRect.intersection` → `Rect::intersection` (returns `Option`-free `Rect` with `is_null`/`is_empty`, mirroring CGRect), `.integral`, `.insetBy`, `.offsetBy`, `.union`, `.standardized`, `contains`, `intersects` |
-| `CGAffineTransform` | `core::geom::AffineTransform` | a,b,c,d,tx,ty; `concatenating`, `inverted`, `applying` |
+| `CGAffineTransform` | `core::geom::AffineTransform` | a,b,c,d,tx,ty; `concatenating`, `inverted`, `applying`. Swift's `A.concatenating(B)` applies the receiver A first and is Rust's `A.then(B)`; Rust's own `A.concatenating(B)` applies the argument first — port every Swift `.concatenating` chain as `.then` (`geom.rs`'s `then_composes_receiver_first_like_swift_concatenating` test pins this) |
 | `CGImage` | `core::Rgba8Image` (immutable, `Arc`-shared) + `render::RasterSnapshot` | no bitmap handles |
 | `CGContext` (bitmap) | `core::Rgba8Image` / `Gray8Image` as drawing target | drawing ops live in `compositor-pixels::raster` |
 | Core Image filters (`CIFilter`, `SeparableBlend`) | hand-written blend kernels in `compositor-pixels::blend` | must match Photoshop/Core Image formulas; sRGB (non-linear) space |
@@ -58,11 +58,16 @@ Dependency direction (no cycles): `core ← pixels ← render ← session ← io
 | Core Text (`CTFont`, `NSFont`) | `cosmic-text`/`fontdue` glyph raster; font name strings kept verbatim | text layer metadata keeps PostScript font names |
 | ImageIO (`CGImageSource/Destination`) | `image` crate + `png` + `jpeg` encode/decode | sRGB, 8-bit, premultiplied conversions preserved |
 | `NSImage` SVG decode | `resvg` rasterization into `Rgba8Image` | SVG import becomes pixels, as upstream |
-| Camera RAW (`CIRAWFilter`) | `rawler` decode + `compositor-pixels::camera_raw` for the develop controls | develop-sheet parameters are identical |
+| Camera RAW (`CIRAWFilter`) | `rawler` decode + `compositor-pixels::camera_raw` for the develop controls | develop-sheet parameters are identical. `rawler` exposes no Kelvin as-shot value, so the develop sheet maps its Kelvin slider onto Camera Raw's *relative* temperature as `(K - 5000)/5000*100` and `boost` onto `contrast = (boost - 1) * 100`; documented in `compositor_io::raw_importer`. |
+| HEIC import | **not available**: no pure-Rust decoder in the workspace | HEIC fails with the unchanged `ImageImportError::Unsupported` message. Restoring it needs a platform decoder (Windows WIC / macOS ImageIO) behind a feature. Recorded as a known gap. |
 | AppKit drag & drop, panels, menus, sheets, tables, text fields | `gpui` + `gpui-kit` widgets; floating panels become child windows/overlays | structure and labels preserved |
 | `@AppStorage` / `UserDefaults` / `ToolDefaults` | `core::settings::ToolDefaults` backed by a JSON file in the config dir | same keys |
 | `NSFileCoordinator`, FSEvents | `notify` + atomic temp-dir-then-rename (package replacement) | same guarantees |
 | Sparkle auto-update | `compositor-app::updates` — appcast feed is still published/parsed (`appcast.xml`), the installer is platform-specific | feature preserved as feed check + release link |
+| `⌘`/`⌥`/`⌃`/`⇧` key equivalents (`configuredKeyboardShortcut`, `ShortcutChord`) | gpui `KeyBinding` keystroke strings: `⌘` (bit 1) → `secondary` (Ctrl on Windows, Cmd on macOS), `⌥` (bit 2) → `alt`, `⌃` (bit 4) → `ctrl`, `⇧` (bit 8) → `shift`. `cmd-`/`win-` spell the *Windows* key, so they are never used | the shortcut table, its labels (`⌘`→`Cmd`, `⌃`→`Ctrl`, `⌥`→`Alt`, `⇧`→`Shift`), the remap store and its validation are unchanged; on Windows `⌘` and `⌃` are the same physical key |
+| AppKit menu bar (`CommandGroup`, `CommandMenu`) | `App::set_menus` plus `gpui_component::menu::AppMenuBar` drawn in the component `TitleBar`, fed by `gpui_base::GlobalState::set_app_menus(cx.get_menus())` | on Windows `set_menus` alone stores the menus and renders nothing, so the glue above is required; the labels, groups, ordering, dynamic titles and enabled rules are the Swift's |
+| AppKit window chrome (`NSWindow.title`, `isDocumentEdited`, `representedURL`) | gpui `WindowOptions.titlebar.title` + the component `TitleBar`; the project name stays on its tab, as the Swift's `.unifiedCompact(showsTitle: false)` did | no edited-dot equivalent: the tab's modified marker is the indicator |
+| `ProjectController`'s reference to its `EditorSession` | the session is a parameter (`&mut EditorSession` / `&EditorSession`) on every controller method, because the port's session is owned by a gpui `Entity` in the UI | same flows, same question order, same wording; the app answers `ProjectPrompter` by replaying the operation with the answers recorded, since gpui's native dialogs are asynchronous |
 | `Task`/`async` UI coordination (`CheckedContinuation` waiters, busy flag) | synchronous commands + a `Busy` flag on `EditorSession`; background work through `rayon`/`std::thread` with a completion queue drained on the UI thread | observable states (`showsBusy`, `isProjectBusy`, `canUndo`, …) preserved |
 
 ## 5. Persistence
