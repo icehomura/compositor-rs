@@ -123,7 +123,10 @@ impl EditorSession {
     /// The document point at the view's center, where an untouched drag or a paste lands.
     pub fn viewport_center_point(&self) -> Option<Point> {
         let document = self.document.as_ref()?;
-        Some(self.viewport.document_point(self.viewport.center(), document.size()))
+        Some(
+            self.viewport
+                .document_point(self.viewport.center(), document.size()),
+        )
     }
 }
 
