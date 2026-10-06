@@ -19,5 +19,6 @@ compositor-session.workspace = true
 compositor-io.workspace = true
 compositor-ui.workspace = true
 gpui-kit = "0.7"
+futures = "0.3"
 log.workspace = true
 env_logger.workspace = true

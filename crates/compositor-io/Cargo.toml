@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 compositor-core.workspace = true
 compositor-pixels.workspace = true
+compositor-session.workspace = true
 image.workspace = true
 png.workspace = true
 flate2.workspace = true
