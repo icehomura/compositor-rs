@@ -219,14 +219,14 @@ impl MagicWand {
     }
 }
 
-/// `CGMutablePath.addLines(between:)` followed by `closeSubpath()`: a move to the first point, lines
-/// to the rest, and a closed subpath.
+/// `CGMutablePath.addLines(between:)` followed by `closeSubpath()`. `CGPathAddLines` always moves to
+/// the first point and appends a line from each point to the next, so this is a closed ring however
+/// the path stood before.
 fn add_loop(path: &mut Path, corners: &[Point]) {
-    let Some(first) = corners.first() else {
+    if corners.is_empty() {
         return;
-    };
-    path.move_to(*first);
-    path.add_lines(&corners[1..]);
+    }
+    path.add_lines(corners);
     path.close_subpath();
 }
 
@@ -386,16 +386,18 @@ impl MaskTracing {
             // Keep only corners: drop vertices that continue in a straight line.
             let mut corners: Vec<Point> = Vec::new();
             for (index, vertex) in walked.iter().enumerate() {
-                let previous = walked[(index + walked.len() - 1) % walked.len()];
-                let following = walked[(index + 1) % walked.len()];
-                let in_x = vertex % stride - previous % stride;
-                let in_y = vertex / stride - previous / stride;
-                let out_x = following % stride - vertex % stride;
-                let out_y = following / stride - vertex / stride;
+                // Signed, as the Swift `Int`s were: the deltas go backwards along the loop.
+                let vertex = *vertex as i64;
+                let previous = walked[(index + walked.len() - 1) % walked.len()] as i64;
+                let following = walked[(index + 1) % walked.len()] as i64;
+                let in_x = vertex % stride as i64 - previous % stride as i64;
+                let in_y = vertex / stride as i64 - previous / stride as i64;
+                let out_x = following % stride as i64 - vertex % stride as i64;
+                let out_y = following / stride as i64 - vertex / stride as i64;
                 if in_x != out_x || in_y != out_y {
                     corners.push(Point::new(
-                        (vertex % stride) as f64,
-                        (vertex / stride) as f64,
+                        (vertex % stride as i64) as f64,
+                        (vertex / stride as i64) as f64,
                     ));
                 }
             }
@@ -418,6 +420,15 @@ impl MaskTracing {
 /// `CIGuidedFilter` does nothing on this system and its edge-preserving upsample barely moves the
 /// mask, so this does the arithmetic directly.
 pub struct GuidedMatte;
+
+/// `CGContext.draw` of a gray image into a gray context at `rect`: the image's own samples,
+/// resampled. [`Canvas::draw_gray`] paints the *paint's* gray through the image's coverage, so the
+/// paint is set white: over the fresh black canvas that lands the image's levels, which is what
+/// Core Graphics composites an alpha-none DeviceGray image with.
+fn draw_gray_samples(canvas: &mut Canvas, image: &Gray8Image, rect: Rect) {
+    canvas.set_fill_gray(1.0);
+    canvas.draw_gray(image, rect);
+}
 
 impl GuidedMatte {
     /// `box(_:width:height:radius:)` — `box` is a reserved word in Rust. Mean over a (2r+1)² square,
@@ -494,7 +505,7 @@ impl GuidedMatte {
         let mut canvas = Canvas::new_gray(width, height);
         canvas.set_interpolation_quality(InterpolationQuality::High);
         if !image.is_empty() {
-            canvas.draw_gray(image, Rect::new(0.0, 0.0, width as f64, height as f64));
+            draw_gray_samples(&mut canvas, image, Rect::new(0.0, 0.0, width as f64, height as f64));
         }
         let scaled = canvas.into_gray();
         scaled
@@ -567,7 +578,7 @@ impl GuidedMatte {
         }
         let mut canvas = Canvas::new_gray(full_width, full_height);
         canvas.set_interpolation_quality(InterpolationQuality::High);
-        canvas.draw_gray(&small, Rect::new(0.0, 0.0, full.width, full.height));
+        draw_gray_samples(&mut canvas, &small, Rect::new(0.0, 0.0, full.width, full.height));
         canvas.into_gray()
     }
 }
@@ -743,7 +754,7 @@ impl ForegroundInstances {
         );
         let mut canvas = Canvas::new_gray(width, height);
         canvas.set_interpolation_quality(InterpolationQuality::High);
-        canvas.draw_gray(&union, Rect::new(0.0, 0.0, width as f64, height as f64));
+        draw_gray_samples(&mut canvas, &union, Rect::new(0.0, 0.0, width as f64, height as f64));
         canvas.into_gray()
     }
 }
@@ -1042,9 +1053,15 @@ impl SubjectRemoval {
         let Some(existing) = under else {
             return Ok(subject);
         };
-        if existing.width() != subject.width() || existing.height() != subject.height() {
-            return Ok(subject);
-        }
+        // The Swift drew the existing mask into a gray context the size of the layer's pixels — a
+        // mask of another size lands scaled — and multiplied the subject into it.
+        let mut canvas = Canvas::new_gray(subject.width(), subject.height());
+        draw_gray_samples(
+            &mut canvas,
+            existing,
+            Rect::new(0.0, 0.0, subject.width() as f64, subject.height() as f64),
+        );
+        let existing = canvas.into_gray();
         // Both masks hide: what either one hides stays hidden. The Swift multiplied the two on a gray
         // `CGContext`; [`Canvas`] composites coverage source-over on gray targets, so the product is
         // computed directly (the same 8-bit multiply).
@@ -1167,13 +1184,16 @@ impl Default for ObjectSelectionSettings {
 }
 
 /// `ObjectSelection.Failure`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObjectSelectionError {
     /// Vision's instance masks need macOS 14. The CPU port always has one, so this is unreachable —
     /// it is kept because the Swift error carries its own message.
     Unsupported,
     /// The mask could not be rendered. Unreachable here: the port's buffers are infallible.
     Render,
+    /// The detected mask's outline failed, exactly as `try MagicWand.outline(of:width:height:)`
+    /// propagated it out of the Swift `select`.
+    Outline(MagicWandError),
 }
 
 impl std::fmt::Display for ObjectSelectionError {
@@ -1185,11 +1205,18 @@ impl std::fmt::Display for ObjectSelectionError {
             ObjectSelectionError::Render => {
                 formatter.write_str("The object mask could not be rendered.")
             }
+            ObjectSelectionError::Outline(error) => formatter.write_str(&error.to_string()),
         }
     }
 }
 
 impl std::error::Error for ObjectSelectionError {}
+
+impl From<MagicWandError> for ObjectSelectionError {
+    fn from(error: MagicWandError) -> Self {
+        ObjectSelectionError::Outline(error)
+    }
+}
 
 /// Selects the foreground object under a clicked point, then traces that mask into the document's
 /// normal path-based selection. The instance mask comes from the port's CPU segmentation (Vision has
@@ -1236,13 +1263,7 @@ impl ObjectSelection {
         let coarse = instances.mask(instance);
         let binary = Self::edge_preserved_binary_mask(&coarse, image, width, height);
         let mask = Self::adjusted(&binary, width, height, edge_offset);
-        let Some(outline) =
-            MagicWand::outline(&mask, width, height).map_err(|error| match error {
-                MagicWandError::TooDetailed | MagicWandError::Memory => {
-                    ObjectSelectionError::Render
-                }
-            })?
-        else {
+        let Some(outline) = MagicWand::outline(&mask, width, height)? else {
             return Ok(None);
         };
         Ok(Some(if smooth_edges {
@@ -1370,6 +1391,9 @@ impl ObjectSelection {
         for subpath in subpaths {
             let simplified = Self::simplify_closed(&subpath, 1.6);
             let points = Self::chaikin(&simplified, 3);
+            // `result.move(to: first)` then `addLines(between: Array(points.dropFirst()))`: upstream
+            // leaves the smoothed ring's first point as a lone move — `CGPathAddLines` starts its own
+            // subpath at the slice's first point — so the ring closes back on the second point.
             let Some(first) = points.first() else {
                 continue;
             };
@@ -1578,7 +1602,7 @@ fn mapped_rect(rect: Rect, transform: AffineTransform) -> Rect {
 mod tests {
     use super::*;
     use compositor_core::image_ops::FilterKind;
-    use compositor_core::path::{flatten, FillRule};
+    use compositor_core::path::flatten;
     use std::collections::BTreeSet;
 
     /// The pixels a traced outline covers, by winding number at each pixel's center — how the Swift
@@ -1643,14 +1667,6 @@ mod tests {
             }
         }
         image
-    }
-
-    fn mask_of(width: usize, height: usize, values: &[(usize, usize)]) -> Vec<u8> {
-        let mut mask = vec![0u8; width * height];
-        for &(x, y) in values {
-            mask[y * width + x] = 255;
-        }
-        mask
     }
 
     const RED: [u8; 4] = [255, 0, 0, 255];
@@ -1824,9 +1840,9 @@ mod tests {
         );
         assert_eq!(MagicWand::outline(&[], 0, 0).unwrap(), None);
         assert_eq!(
-            MagicWand::outline(&[255, 0, 0, 0], 2, 2).unwrap(),
+            MagicWand::outline(&[255, 0], 2, 2).unwrap(),
             None,
-            "a mask whose size does not match its pixel count has no outline"
+            "a mask whose length does not match its size has no outline"
         );
     }
 
@@ -1845,10 +1861,10 @@ mod tests {
         });
         // Gray 127 is a dark pixel, gray 128 a white one — the 50% split the Swift tests use.
         let white = MaskTracing::white_pixels(&mask).unwrap();
-        let white_pixels: BTreeSet<usize> = BTreeSet::from([1, 2, 3, 5, 6, 7, 8]);
+        let white_pixels: BTreeSet<usize> = BTreeSet::from([0, 1, 2, 3, 5, 7, 8]);
         assert_eq!(covered_pixels(&white, 3, 3), white_pixels);
         let dark = MaskTracing::dark_pixels(&mask).unwrap();
-        assert_eq!(covered_pixels(&dark, 3, 3), BTreeSet::from([0, 4]));
+        assert_eq!(covered_pixels(&dark, 3, 3), BTreeSet::from([4, 6]));
         assert_eq!(MaskTracing::white_pixels(&Gray8Image::new(2, 2)), None);
         assert_eq!(
             MaskTracing::dark_pixels(&Gray8Image::uniform(2, 2, 255)),
@@ -1887,22 +1903,28 @@ mod tests {
             }
         });
         let include = [100u8, 100, 100];
-        assert_eq!(
-            color_range_mask(&image, &include, &[], 40, false),
-            [255, 255, 255, 0]
-        );
+        // A pixel matches when every channel is within `fuzziness`: gray 140 is 40 away from 100.
         assert_eq!(
             color_range_mask(&image, &include, &[], 39, false),
             [255, 255, 0, 0]
         );
         assert_eq!(
-            color_range_mask(&image, &include, &[], 40, true),
-            [0, 0, 0, 255]
+            color_range_mask(&image, &include, &[], 40, false),
+            [255, 255, 255, 255]
         );
-        let path = color_range_path(&image, &include, &[], 40, false)
+        assert_eq!(
+            color_range_mask(&image, &include, &[], 40, true),
+            [0, 0, 0, 0]
+        );
+        let path = color_range_path(&image, &include, &[], 39, false)
             .unwrap()
             .unwrap();
-        assert_eq!(covered_pixels(&path, 4, 1), BTreeSet::from([0, 1, 2]));
+        assert_eq!(covered_pixels(&path, 4, 1), BTreeSet::from([0, 1]));
+        assert_eq!(
+            color_range_path(&image, &include, &[], 40, true).unwrap(),
+            None,
+            "inverting a mask that matches everything selects nothing"
+        );
         assert_eq!(
             color_range_path(&image, &[1, 2, 3], &[], 0, false).unwrap(),
             None
@@ -1920,25 +1942,63 @@ mod tests {
         // Radius 1 at x = 0 clamps the left neighbor to the pixel itself: (0 + 0 + 0) / 3.
         let boxed = GuidedMatte::box_mean(&source, 4, 1, 1);
         assert_eq!(boxed[0], 0.0);
-        assert_eq!(boxed[3], (1.0 + 1.0 + 1.0) / 3.0);
+        // x = 3 clamps the right neighbor to the last pixel: (0 + 1 + 1) / 3.
+        assert_eq!(boxed[3], 2.0 / 3.0);
         let constant = vec![0.25f32; 12];
         assert_eq!(GuidedMatte::box_mean(&constant, 4, 3, 2), constant);
         assert_eq!(GuidedMatte::box_mean(&[], 0, 0, 1), Vec::<f32>::new());
+        // The vertical pass is the transposed row pass: a column step averages the same way.
+        let column = [0f32, 0.0, 0.0, 1.0];
+        assert_eq!(GuidedMatte::box_mean(&column, 1, 4, 1)[3], 2.0 / 3.0);
     }
 
     #[test]
-    fn guided_matte_filter_with_a_flat_guide_returns_the_mask() {
+    fn guided_matte_filter_follows_a_guide_that_carries_the_mask() {
+        let width = 16usize;
+        let height = 8usize;
+        // A step in the guide with the mask's own step on it: the fit is a perfect line, so the
+        // interior comes back exactly and only the radius around the edge blends.
+        let step = |x: usize| if x < width / 2 { 1.0f32 } else { 0.0 };
+        let mask: Vec<f32> = (0..width * height).map(|i| step(i % width)).collect();
+        let guide = mask.clone();
+        let filtered = GuidedMatte::filter(&mask, &guide, width, height, 2, 1e-4);
+        for y in 0..height {
+            for x in 0..width {
+                let value = filtered[y * width + x];
+                // Only windows clear of the step keep their side: x + radius < step, or
+                // x - radius >= step.
+                let radius = 2;
+                let clear_of_the_step = x + radius < width / 2 || x >= width / 2 + radius;
+                if clear_of_the_step {
+                    assert!(
+                        (value - step(x)).abs() < 1e-4,
+                        "({x}, {y}) keeps its side: {value}"
+                    );
+                }
+            }
+        }
+        // A flat guide has no variance to fit, so the result is the mask's own box mean.
+        let flat = vec![0.5f32; width * height];
+        let smoothed = GuidedMatte::filter(&mask, &flat, width, height, 2, 1e-4);
+        let twice = GuidedMatte::box_mean(
+            &GuidedMatte::box_mean(&mask, width, height, 2),
+            width,
+            height,
+            2,
+        );
+        for (value, &expected) in smoothed.iter().zip(twice.iter()) {
+            assert!((value - expected).abs() < 1e-4, "{value} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn guided_matte_filter_of_a_constant_guide_and_mask_is_exact() {
         let width = 4;
         let height = 3;
-        let mask: Vec<f32> = (0..width * height).map(|i| i as f32 / 11.0).collect();
+        let mask = vec![0.25f32; width * height];
         let guide = vec![0.5f32; width * height];
         let filtered = GuidedMatte::filter(&mask, &guide, width, height, 1, 1e-4);
-        for (value, &source) in filtered.iter().zip(mask.iter()) {
-            assert!(
-                (value - source).abs() < 1e-6,
-                "a flat guide has no variance to lean on: {value} vs {source}"
-            );
-        }
+        assert_eq!(filtered, mask);
     }
 
     #[test]
@@ -1964,6 +2024,29 @@ mod tests {
         assert_eq!(refined.height(), size);
         assert!(refined.get(4, 4) > 250, "the mask side stays white");
         assert!(refined.get(12, 12) < 5, "the background side stays black");
+    }
+
+    #[test]
+    fn guided_matte_refine_works_on_a_smaller_copy_and_draws_it_back() {
+        let size = 16usize;
+        let mask = gray_image(size, size, |x, _| if x < size / 2 { 255 } else { 0 });
+        let guide = rgba_image(size, size, |x, _| {
+            if x < size / 2 {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 255]
+            }
+        });
+        // A limit of 8 on a 16-pixel side refines an 8 × 8 copy and draws it back up, so the result
+        // is still the mask's own size.
+        let refined = GuidedMatte::refine(&mask, &guide, 2.0, 8.0);
+        assert_eq!(refined.width(), size);
+        assert_eq!(refined.height(), size);
+        assert!(
+            refined.get(4, 4) > 180,
+            "the mask side survives the round trip"
+        );
+        assert!(refined.get(12, 12) < 75, "so does the background side");
     }
 
     #[test]
@@ -2065,6 +2148,27 @@ mod tests {
         );
         assert_eq!(ObjectSelectionSettings::default().sample_all_layers, true);
         assert_eq!(ObjectSelectionSettings::default().edge_offset, 0);
+    }
+
+    #[test]
+    fn content_fill_paints_the_selection_through_the_jobs_mapping() {
+        // The image sits at document x + 2. A selection covering the image's whole document
+        // footprint leaves no donor pixels, which pins the transform's direction: were `mapping`
+        // not inverted onto the mask context, the clip would land inside the image and the fill
+        // would succeed.
+        let width = 8usize;
+        let height = 8usize;
+        let original = rgba_image(width, height, |_, _| [90, 140, 200, 255]);
+        let mapping = AffineTransform::translation(2.0, 0.0);
+        let coverage = Gray8Image::uniform(width, height, 255);
+        let selection = SelectionClip::new(
+            Rect::new(2.0, 0.0, width as f64, height as f64),
+            Some(coverage),
+        );
+        assert_eq!(
+            ContentFill::fill(&original, Some(&selection), mapping),
+            Err(ContentFillError::NoSource)
+        );
     }
 
     #[test]
