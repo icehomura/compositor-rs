@@ -5,3 +5,6 @@
 /Release
 dist/
 .scratch/
+
+# reference checkouts / upstream source, not part of the project
+/references/
