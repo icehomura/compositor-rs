@@ -301,6 +301,19 @@ pub type SharedImage = Arc<Rgba8Image>;
 /// A gray raster shared the same way: masks and selections.
 pub type SharedGray = Arc<Gray8Image>;
 
+/// A gray image as the opaque gray pixels `CGContext.draw` makes of a DeviceGray image in a color
+/// context: premultiplied `[v, v, v, 255]`.
+pub fn opaque_gray(image: &Gray8Image) -> Rgba8Image {
+    let mut result = Rgba8Image::new(image.width(), image.height());
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            let value = image.get(x, y);
+            result.set(x, y, [value, value, value, 255]);
+        }
+    }
+    result
+}
+
 /// A premultiplied color as components 0…1.
 pub fn unpack(pixel: [u8; 4]) -> [f64; 4] {
     [
