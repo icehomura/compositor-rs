@@ -1526,9 +1526,10 @@ impl ContentFill {
         mask.fill_rect(mapped_rect(rect, mapping));
         let mask = mask.into_gray();
         let mut pixels = pixels.into_rgba();
+        let stride = pixels.stride();
         let result = crate::content_fill::content_fill(
             pixels.data_mut(),
-            pixels.stride(),
+            stride,
             mask.data(),
             mask.stride(),
             width as i32,

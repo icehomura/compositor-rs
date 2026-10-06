@@ -9,7 +9,7 @@
 
 use crate::canvas::{Canvas, InterpolationQuality};
 use compositor_core::blend::LayerBlendMode;
-use compositor_core::geom::{AffineTransform, Point, Rect};
+use compositor_core::geom::{AffineTransform, Point, Rect, Size};
 use compositor_core::imported_image::PixelImage;
 use compositor_core::layer_transform::LayerTransform;
 use compositor_core::{Gray8Image, PaletteColor, Rgba8Image};
@@ -109,7 +109,7 @@ impl Raster {
             canvas.fill_rect(rect);
         } else {
             canvas.set_blend_mode(LayerBlendMode::Normal);
-            canvas.clear_rect(rect);
+            canvas.clear(rect);
             match image {
                 PixelImage::Rgba(rgba) => canvas.draw_image(rgba, rect),
                 PixelImage::Gray(gray) => canvas.draw_image(&gray_as_rgba(gray), rect),
@@ -262,8 +262,13 @@ mod tests {
         };
         let map = Raster::pixel_to_document(&transform, 200.0, 100.0);
         assert_eq!(map, AffineTransform::IDENTITY.translated_by(10.0, 20.0));
-        // Which is exactly what the unit-square map does.
-        assert_eq!(map, Raster::pixel_to_document(&transform, 1.0, 1.0));
+        // A 1×1 image over the same placement is the unit square stretched over 200×100: the same
+        // map the image's own size gives, scaled by that size.
+        let unit = Raster::pixel_to_document(&transform, 1.0, 1.0);
+        assert!((unit.a - 200.0).abs() < 1e-12 && (unit.d - 100.0).abs() < 1e-12);
+        assert!((unit.tx - 10.0).abs() < 1e-12 && (unit.ty - 20.0).abs() < 1e-12);
+        let unit_corner = unit.applying(Point::new(1.0, 1.0));
+        assert!((unit_corner.x - 210.0).abs() < 1e-9 && (unit_corner.y - 120.0).abs() < 1e-9);
         // The image's corners land on the transform's.
         let top_left = map.applying(Point::new(0.0, 0.0));
         assert!((top_left.x - 10.0).abs() < 1e-9 && (top_left.y - 20.0).abs() < 1e-9);
