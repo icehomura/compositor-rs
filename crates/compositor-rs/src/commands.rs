@@ -3,7 +3,7 @@
 //! handlers in `Rendering/EditorCanvas.swift`, `UI/NativeLayerList.swift` and
 //! `Rendering/InlineTextEditor.swift`.
 //!
-//! [`register`] answers every `compositor::*` action that is a session command, against the front
+//! [`register`] answers every `compositor_rs::*` action that is a session command, against the front
 //! tab's session (`workspace.current().session`, read at dispatch time). The commands that need the
 //! file layer or the floating-panel host — New/Open/Save/Export/Close, the recent menu,
 //! `ImportImages`, the Keyboard Shortcuts sheet, `GridSettings`, `CanvasSize`, `ImageSize` and
@@ -65,7 +65,7 @@ use compositor_rs_ui::workspace::ProjectWorkspace;
 use gpui_kit::component::input as text_input;
 use gpui_kit::*;
 
-/// Registers one handler for every `compositor::*` action that is a session command.
+/// Registers one handler for every `compositor_rs::*` action that is a session command.
 ///
 /// The handlers read the front tab's session when the action arrives, so a command always reaches
 /// the project in front.

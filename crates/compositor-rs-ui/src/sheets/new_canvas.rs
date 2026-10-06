@@ -2,7 +2,7 @@
 //! empty editor (port of `UI/NewCanvasSheet.swift`).
 //!
 //! It is hosted over the canvas while the session has no document (`ContentView`'s `welcome`), not
-//! as a modal. "Open project" dispatches `compositor::OpenProject` — the app answers it with its
+//! as a modal. "Open project" dispatches `compositor_rs::OpenProject` — the app answers it with its
 //! open panel — and "Create canvas" calls the caller's `onCreate` (`ProjectController.newCanvas`
 //! in the Swift), or `EditorSession::create_document` when no callback was given.
 
@@ -32,7 +32,7 @@ const PADDING: f32 = 28.0;
 const ORANGE: Hsla = hsla(0.075, 1.0, 0.5, 1.0);
 
 /// The welcome sheet's `onCreate` (`onOpen` is not a callback in the port: the sheet dispatches the
-/// `compositor::OpenProject` action, which the app answers).
+/// `compositor_rs::OpenProject` action, which the app answers).
 #[derive(Clone, Default)]
 pub struct NewCanvasSheetCallbacks {
     pub on_create: Option<Arc<dyn Fn(usize, usize, &mut App)>>,

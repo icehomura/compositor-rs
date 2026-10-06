@@ -249,7 +249,7 @@ impl ShortcutDefinition {
         }
     }
 
-    /// The gpui binding this definition runs at `keystroke`: the `compositor` action the Swift menu item
+    /// The gpui binding this definition runs at `keystroke`: the `compositor_rs` action the Swift menu item
     /// or canvas key ran, in its group's context.
     fn binding(&self, keystroke: &str) -> KeyBinding {
         let context = self.context();
@@ -526,7 +526,7 @@ impl ShortcutDefinition {
             "Increase leading by 10" => {
                 KeyBinding::new(keystroke, AdjustTextLeading { step: 10.0 }, context)
             }
-            title => unreachable!("the shortcut table has no compositor action for {title:?}"),
+            title => unreachable!("the shortcut table has no compositor_rs action for {title:?}"),
         }
     }
 }
@@ -1257,12 +1257,12 @@ mod tests {
         // 113 definitions, four of those keys spelled twice on Windows, and 41 Shift fallbacks (31
         // base-key definitions, the ten digits binding under both spellings): 117 + 41.
         assert_eq!(bindings.len(), 158);
-        assert_eq!(bindings[0].action().name(), "compositor::Undo");
+        assert_eq!(bindings[0].action().name(), "compositor_rs::Undo");
         assert_eq!(bindings[0].keystrokes()[0].key(), "z");
         assert_eq!(bindings[0].predicate(), None);
         let select_tool = bindings
             .iter()
-            .find(|binding| binding.action().name() == "compositor::SelectTool")
+            .find(|binding| binding.action().name() == "compositor_rs::SelectTool")
             .expect("the Select tool key is bound");
         assert_eq!(select_tool.keystrokes()[0].key(), "a");
         assert!(select_tool.predicate().is_some());
@@ -1281,23 +1281,23 @@ mod tests {
                 .collect()
         };
         let settings = ShortcutSettings::default();
-        assert_eq!(bound(&settings, "compositor::SelectTool"), ["a", "shift-a"]);
-        assert_eq!(bound(&settings, "compositor::ShapeTool"), ["u"]);
+        assert_eq!(bound(&settings, "compositor_rs::SelectTool"), ["a", "shift-a"]);
+        assert_eq!(bound(&settings, "compositor_rs::ShapeTool"), ["u"]);
         // Shift has its own commands for these keys, so the base key does not answer for them.
-        assert_eq!(bound(&settings, "compositor::CycleShapeKind"), ["shift-u"]);
-        assert_eq!(bound(&settings, "compositor::DecreaseBrushSize"), ["["]);
+        assert_eq!(bound(&settings, "compositor_rs::CycleShapeKind"), ["shift-u"]);
+        assert_eq!(bound(&settings, "compositor_rs::DecreaseBrushSize"), ["["]);
         assert_eq!(
-            bound(&settings, "compositor::DecreaseBrushHardness"),
+            bound(&settings, "compositor_rs::DecreaseBrushHardness"),
             [ShortcutChord::new("[", SHIFT).keystrokes()[0].clone()]
         );
         // Tab's own branch takes no modifiers, so Shift+Tab is not the canvas's.
-        assert_eq!(bound(&settings, "compositor::CycleToolMode"), ["tab"]);
+        assert_eq!(bound(&settings, "compositor_rs::CycleToolMode"), ["tab"]);
         assert!(!settings
             .bindings()
             .iter()
             .any(|binding| binding.keystrokes()[0].unparse() == "shift-tab"));
         // The digit keys fall back too, under every spelling the platform gives the shifted key.
-        let digits = bound(&settings, "compositor::TypeOpacityDigit");
+        let digits = bound(&settings, "compositor_rs::TypeOpacityDigit");
         for keystroke in ShortcutChord::new("3", SHIFT).keystrokes() {
             assert!(digits.contains(&keystroke), "{keystroke} types the digit");
         }
@@ -1310,7 +1310,7 @@ mod tests {
             select_tool.id(),
             ShortcutChord::new("y", 0)
         )])));
-        assert_eq!(bound(&moved, "compositor::SelectTool"), ["y", "shift-y"]);
+        assert_eq!(bound(&moved, "compositor_rs::SelectTool"), ["y", "shift-y"]);
     }
 
     /// The canvas and the text editor have their own bindings, the menus are app-wide.

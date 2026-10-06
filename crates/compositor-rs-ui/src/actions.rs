@@ -1,4 +1,4 @@
-//! Every editor command, as a gpui action in the `compositor` namespace.
+//! Every editor command, as a gpui action in the `compositor_rs` namespace.
 //!
 //! The names are the Swift commands' own names (`NewCanvas`, `OpenProject`, `MergeLayers`, …) so a view's
 //! `on_action` handler reads like the `Button` it replaces, and the menu bar (built by `compositor-rs`)
@@ -14,9 +14,9 @@ use compositor_rs_core::image_ops::FilterKind;
 use compositor_rs_core::layer_adjustment::AdjustmentKind;
 use compositor_rs_core::layer_effects::LayerEffectKind;
 
-/// The action namespace. Every name is `compositor::<Name>`; registering a second action under the same
+/// The action namespace. Every name is `compositor_rs::<Name>`; registering a second action under the same
 /// name panics when the app starts, so this is the one list.
-pub const NAMESPACE: &str = "compositor";
+pub const NAMESPACE: &str = "compositor_rs";
 
 /// Which way a nudge moves, as the canvas's arrow-key keys read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,7 +27,7 @@ pub enum ArrowDirection {
     Down,
 }
 
-gpui_kit::actions!(compositor, [
+gpui_kit::actions!(compositor_rs, [
     // Undo/Redo (CommandGroup(replacing: .undoRedo)).
     Undo,
     Redo,
@@ -164,7 +164,7 @@ gpui_kit::actions!(compositor, [
 /// Field-carrying actions are declared here rather than by the `actions!` macro; they carry no JSON form
 /// (nothing loads them from a keymap file), so they are marked `no_json`.
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct OpenRecentProject {
     pub path: String,
 }
@@ -172,7 +172,7 @@ pub struct OpenRecentProject {
 /// Opens one of the filters' or adjustments' editors, as the Filter menu's and Image menu's
 /// `ForEach(FilterKind…)` loops did (`session.beginFilter(kind)`).
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct BeginFilter {
     pub kind: FilterKind,
 }
@@ -180,7 +180,7 @@ pub struct BeginFilter {
 /// Adds an adjustment layer of this kind, as `Layer > New Adjustment Layer` did
 /// (`session.addAdjustment(kind)`).
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct AddAdjustment {
     pub kind: AdjustmentKind,
 }
@@ -188,7 +188,7 @@ pub struct AddAdjustment {
 /// Adds a layer effect of this kind, as the Layers panel's effects menu did
 /// (`session.addEffect(kind)`).
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct AddEffect {
     pub kind: LayerEffectKind,
 }
@@ -196,14 +196,14 @@ pub struct AddEffect {
 /// Types one digit into the brush's opacity, as the canvas's `1`–`0` keys did
 /// (`session.typeOpacityDigit(digit)`); two digits in quick succession are an exact percent.
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct TypeOpacityDigit {
     pub digit: i32,
 }
 
 /// Nudges the layer (or, with a selection tool, the selection) by `distance` pixels.
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct Nudge {
     pub direction: ArrowDirection,
     pub distance: i32,
@@ -211,7 +211,7 @@ pub struct Nudge {
 
 /// Moves the selected pixels by `distance` pixels, whatever tool is active.
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct MoveSelectedPixels {
     pub direction: ArrowDirection,
     pub distance: i32,
@@ -219,7 +219,7 @@ pub struct MoveSelectedPixels {
 
 /// Changes a text layer's tracking; negative steps close the letters up.
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct AdjustTextTracking {
     pub step: f64,
 }
@@ -227,7 +227,7 @@ pub struct AdjustTextTracking {
 /// Changes a text layer's leading; the canvas counts from the Auto line height, with the up arrow closing
 /// the lines up.
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(namespace = compositor, no_json)]
+#[action(namespace = compositor_rs, no_json)]
 pub struct AdjustTextLeading {
     pub step: f64,
 }
@@ -240,25 +240,25 @@ mod tests {
     /// The names the menu bar and the shortcut table look up are the Swift command names, namespaced.
     #[test]
     fn action_names_are_the_namespaced_swift_names() {
-        assert_eq!(Undo.name(), "compositor::Undo");
-        assert_eq!(SaveProject.name(), "compositor::SaveProject");
-        assert_eq!(CycleToolMode.name(), "compositor::CycleToolMode");
+        assert_eq!(Undo.name(), "compositor_rs::Undo");
+        assert_eq!(SaveProject.name(), "compositor_rs::SaveProject");
+        assert_eq!(CycleToolMode.name(), "compositor_rs::CycleToolMode");
         assert_eq!(
             Nudge {
                 direction: ArrowDirection::Left,
                 distance: 1,
             }
             .name(),
-            "compositor::Nudge"
+            "compositor_rs::Nudge"
         );
         assert_eq!(
             AddEffect {
                 kind: LayerEffectKind::ALL[0],
             }
             .name(),
-            "compositor::AddEffect"
+            "compositor_rs::AddEffect"
         );
-        assert_eq!(NAMESPACE, "compositor");
+        assert_eq!(NAMESPACE, "compositor_rs");
     }
 
     /// Two actions of the same type but different data are not the same command.
