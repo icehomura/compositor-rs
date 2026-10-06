@@ -2,11 +2,18 @@
 //!
 //! Ported from `Document/CloneStamp.swift` (`CloneSettings`), `Document/MagicWand.swift`
 //! (`WandSettings`, `WandSampleSize`) and `Document/ObjectSelection.swift`
-//! (`ObjectSelectionSettings`). `SpotHealingMode` is the pixels crate's kernel-side enum; it is
-//! re-exported here so every tool header reaches the tool options in one place.
+//! (`ObjectSelectionSettings`). The wand and object-selection settings — and the Spot Healing
+//! Brush's `SpotHealingMode` — are the same value types the pixel kernels take
+//! (`compositor_pixels::masks`, `compositor_pixels::brush`); they are re-exported here so every tool
+//! header reaches the tool options in one place, and so the session's fields and the kernel calls
+//! are the same types.
 
 /// The Spot Healing Brush's modes (`SpotHealingMode`, `Document/BrushStroke.swift`).
 pub use compositor_pixels::brush::SpotHealingMode;
+/// The Magic Wand's options-bar settings and sample sizes (`Document/MagicWand.swift`).
+pub use compositor_pixels::masks::{WandSampleSize, WandSettings};
+/// Object Selection's options-bar settings (`Document/ObjectSelection.swift`).
+pub use compositor_pixels::masks::ObjectSelectionSettings;
 
 /// Clone Stamp's options-bar settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,91 +34,8 @@ impl Default for CloneSettings {
     }
 }
 
-/// How much of the image the wand averages around the click.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum WandSampleSize {
-    Point,
-    ThreeByThree,
-    FiveByFive,
-}
-
-impl WandSampleSize {
-    /// `CaseIterable` order: the options bar's order.
-    pub const ALL: [WandSampleSize; 3] = [
-        WandSampleSize::Point,
-        WandSampleSize::ThreeByThree,
-        WandSampleSize::FiveByFive,
-    ];
-
-    /// The raw value is the enum's `Int` case order, as in Swift.
-    pub fn raw_value(self) -> i32 {
-        match self {
-            WandSampleSize::Point => 0,
-            WandSampleSize::ThreeByThree => 1,
-            WandSampleSize::FiveByFive => 2,
-        }
-    }
-
-    pub fn from_raw(value: i32) -> Option<Self> {
-        Self::ALL.into_iter().find(|size| size.raw_value() == value)
-    }
-
-    pub fn title(self) -> &'static str {
-        ["Point Sample", "3 by 3 Average", "5 by 5 Average"][self.raw_value() as usize]
-    }
-
-    /// Pixels either side of the click that are averaged into the color to match.
-    pub fn radius(self) -> i32 {
-        self.raw_value()
-    }
-}
-
-impl Default for WandSampleSize {
-    fn default() -> Self {
-        WandSampleSize::Point
-    }
-}
-
-/// The Magic Wand's options-bar settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WandSettings {
-    /// How far (0–255) each channel may differ from the sampled color and still be selected.
-    pub tolerance: i32,
-    pub sample_size: WandSampleSize,
-    /// Only similar pixels connected to the clicked one, rather than every similar pixel.
-    pub contiguous: bool,
-    /// Read the visible composite rather than just the active layer.
-    pub sample_all_layers: bool,
-}
-
-impl Default for WandSettings {
-    fn default() -> Self {
-        Self {
-            tolerance: 32,
-            sample_size: WandSampleSize::Point,
-            contiguous: true,
-            sample_all_layers: false,
-        }
-    }
-}
-
-/// Object Selection's options-bar settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ObjectSelectionSettings {
-    /// Read the visible composite rather than just the active layer.
-    pub sample_all_layers: bool,
-    /// Positive values erode the detected mask inward; negative values expand it outward.
-    pub edge_offset: i32,
-}
-
-impl Default for ObjectSelectionSettings {
-    fn default() -> Self {
-        Self {
-            sample_all_layers: true,
-            edge_offset: 0,
-        }
-    }
-}
+/// How much of the image the wand averages around the click, and the wand's and Object Selection's
+/// options-bar settings, are the pixels crate's own value types; `tools.rs` re-exports them above.
 
 #[cfg(test)]
 mod tests {
