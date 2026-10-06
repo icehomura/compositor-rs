@@ -451,8 +451,20 @@ impl Canvas {
             return Coverage::empty();
         }
         if image.width() == 1 && image.height() == 1 {
-            // A uniform mask keeps the same shape at full coverage.
-            return Coverage::uniform(rect, image.get(0, 0) as f64 / 255.0, self.pixel_size());
+            // A uniform mask keeps the same shape at full coverage. `Coverage` is kept in device
+            // space, so the rect is mapped through the CTM first: a context that is scaled or
+            // translated (the canvas's viewport) would otherwise clip at the wrong place.
+            let (min_y, max_y, min_x, max_x) = self.device_bounds(rect);
+            return Coverage::uniform(
+                Rect::new(
+                    min_x as f64,
+                    min_y as f64,
+                    (max_x - min_x) as f64,
+                    (max_y - min_y) as f64,
+                ),
+                image.get(0, 0) as f64 / 255.0,
+                self.pixel_size(),
+            );
         }
         let bounds = self.device_bounds(rect);
         let mut coverage = Coverage::zeroed(Rect::new(
@@ -471,12 +483,13 @@ impl Canvas {
                 if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
                     continue;
                 }
-                let value = sample_u8(
-                    image,
-                    u * image.width() as f64 - 0.5,
-                    v * image.height() as f64 - 0.5,
-                    self.state.interpolation,
-                );
+                // Core Graphics edge-extends when it resamples a mask: a sample just outside the
+                // image keeps the border pixel's value, so a clip along the image's own edge stays
+                // fully covered instead of fading toward zero. Only the clip path does this here;
+                // image draws keep their own sampling.
+                let sx = (u * image.width() as f64 - 0.5).clamp(0.0, image.width() as f64 - 1.0);
+                let sy = (v * image.height() as f64 - 0.5).clamp(0.0, image.height() as f64 - 1.0);
+                let value = sample_u8(image, sx, sy, self.state.interpolation);
                 coverage.set(x - bounds.2, y - bounds.0, value as f64 / 255.0);
             }
         }
@@ -490,26 +503,33 @@ impl Canvas {
             self.state.ctm.applying(Point::new(rect.max_x(), rect.max_y())),
             self.state.ctm.applying(Point::new(rect.min_x(), rect.max_y())),
         ];
-        let min_x = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min).floor().max(0.0);
-        let min_y = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).floor().max(0.0);
+        // Both edges clamp into the canvas: a rect lying fully outside collapses to an empty range
+        // (Swift draws nothing there) instead of leaving min > max, which would underflow below.
+        let min_x = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::INFINITY, f64::min)
+            .floor()
+            .clamp(0.0, self.width() as f64);
+        let min_y = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::INFINITY, f64::min)
+            .floor()
+            .clamp(0.0, self.height() as f64);
         let max_x = corners
             .iter()
             .map(|p| p.x)
             .fold(f64::NEG_INFINITY, f64::max)
             .ceil()
-            .min(self.width() as f64);
+            .clamp(0.0, self.width() as f64);
         let max_y = corners
             .iter()
             .map(|p| p.y)
             .fold(f64::NEG_INFINITY, f64::max)
             .ceil()
-            .min(self.height() as f64);
-        (
-            min_y.max(0.0) as usize,
-            max_y.max(0.0) as usize,
-            min_x.max(0.0) as usize,
-            max_x.max(0.0) as usize,
-        )
+            .clamp(0.0, self.height() as f64);
+        (min_y as usize, max_y as usize, min_x as usize, max_x as usize)
     }
 
     fn draw_rgba(&mut self, image: &Rgba8Image, rect: Rect, gray_target: bool) {
@@ -560,7 +580,11 @@ impl Canvas {
         let width = rect.width().max(0.0) as usize;
         let height = rect.height().max(0.0) as usize;
         let mut mask = Gray8Image::new(width, height);
-        let has_mask = current.mask.is_some() || !coverage.is_uniform();
+        // The clip is kept as a rect plus an optional mask, so a coverage that is flat but not fully
+        // opaque — a half-transparent `clip(to:mask:)` — has to stay in the mask; only a product of
+        // 1.0 everywhere can be left to the rect alone.
+        let uniform_one = coverage.is_uniform() && coverage.values.first() == Some(&1.0);
+        let has_mask = current.mask.is_some() || !uniform_one;
         if has_mask {
             for y in 0..height {
                 for x in 0..width {
@@ -609,7 +633,9 @@ impl Canvas {
                 }
                 let pixel = match &paint {
                     Paint::Gray(gray) => {
-                        let byte = to_byte(*gray);
+                        // Premultiplied like the other paints: a gray fill at half alpha carries half
+                        // the gray, and the alpha is the coverage (`CGColor(gray:alpha:)`).
+                        let byte = to_byte(*gray * value);
                         [byte, byte, byte, to_byte(value)]
                     }
                     Paint::Color(color) => [
@@ -654,10 +680,12 @@ impl Canvas {
                 if x >= image.width() || y >= image.height() {
                     return;
                 }
-                // Coverage onto a mask is a plain source-over of the alpha channel.
+                // A mask target has no channels for color: the paint's own gray is what lands, as
+                // `source_over`'s single channel — premultiplied gray over what is there. Using the
+                // coverage alone would make every fill white, black ones included.
                 let existing = image.get(x, y) as f64 / 255.0;
                 let source_alpha = source[3] as f64 / 255.0;
-                let value = source_alpha + existing * (1.0 - source_alpha);
+                let value = source[0] as f64 / 255.0 + existing * (1.0 - source_alpha);
                 image.set(x, y, to_byte(value));
             }
         }
@@ -904,7 +932,10 @@ fn gradient_color(gradient: &GradientPaint, point: Point) -> [f64; 4] {
     stops[stops.len() - 1].1
 }
 
-/// Scanline rasterization of device-space polygons.
+/// Scanline rasterization of device-space polygons. Antialiased fills take four vertical subsamples
+/// a pixel and the exact horizontal span coverage; aliased fills take one sample at the pixel row's
+/// centre and a hard horizontal rule — a pixel is in or out by its own centre, as Core Graphics'
+/// aliased scan conversion has no partial coverage.
 fn rasterize_polygons(polygons: &[Subpath], rule: FillRule, antialias: bool, size: Size) -> Coverage {
     let mut min_y = f64::INFINITY;
     let mut max_y = f64::NEG_INFINITY;
@@ -974,7 +1005,11 @@ fn rasterize_polygons(polygons: &[Subpath], rule: FillRule, antialias: bool, siz
                 if end <= start {
                     continue;
                 }
-                add_span(&mut row_coverage, left, start, end);
+                if antialias {
+                    add_span(&mut row_coverage, left, start, end);
+                } else {
+                    add_hard_span(&mut row_coverage, left, start, end);
+                }
             }
         }
         let divisor = samples as f64;
@@ -1004,6 +1039,24 @@ fn add_span(row: &mut [f64], left: f64, start: f64, end: f64) {
         if overlap > 0.0 {
             row[index] += overlap;
         }
+    }
+}
+
+/// Adds `[start, end)` to a row of pixels the aliased way: a pixel is fully covered when its centre
+/// — device `x + 0.5`, the same point the row sample tests in y — lies inside the span, and not at
+/// all otherwise.
+fn add_hard_span(row: &mut [f64], left: f64, start: f64, end: f64) {
+    let start = start.max(left);
+    let end = end.min(left + row.len() as f64);
+    if end <= start {
+        return;
+    }
+    // Index `i` has centre `left + i + 0.5`, so the first covered centre is `ceil(start - left - 0.5)`
+    // and the last one is the pixel before `ceil(end - left - 0.5)`.
+    let first = ((start - left) - 0.5).ceil().max(0.0) as usize;
+    let last = (((end - left) - 0.5).ceil().max(0.0) as usize).min(row.len());
+    for index in first..last {
+        row[index] = 1.0;
     }
 }
 
@@ -1078,5 +1131,40 @@ mod tests {
         let pixel = canvas.snapshot().get(1, 1);
         assert_eq!(pixel[3], 128, "half coverage keeps half the alpha");
         assert_eq!(pixel[2], 128, "premultiplied blue tracks the coverage");
+    }
+
+    #[test]
+    fn a_mask_clip_at_the_image_border_keeps_full_coverage() {
+        // Core Graphics edge-extends a clip mask's samples: magnified 2.25× here, the solid mask
+        // stays fully opaque along its own border instead of fading toward zero outside the image.
+        let mut canvas = Canvas::new_rgba(16, 16);
+        canvas.clip_to_image(&Gray8Image::uniform(4, 4, 255), Rect::new(0.0, 0.0, 9.0, 9.0));
+        canvas.set_fill_color(PaletteColor::new(1.0, 1.0, 1.0));
+        canvas.fill_rect(Rect::new(0.0, 0.0, 16.0, 16.0));
+        let image = canvas.snapshot();
+        for y in 0..9 {
+            for x in 0..9 {
+                assert_eq!(image.get(x, y)[3], 255, "border coverage at ({x}, {y})");
+            }
+        }
+        assert_eq!(image.get(9, 4)[3], 0, "the clip still ends at the mask's rect");
+    }
+
+    #[test]
+    fn a_mask_fully_outside_the_canvas_draws_nothing() {
+        // Regression: a mask placed entirely off-canvas produced device bounds with min > max and
+        // panicked with `attempt to subtract with overflow`. Swift clips to nothing there, so both
+        // the uniform 1×1 path and the sampled path must collapse to an empty range.
+        let mut canvas = Canvas::new_rgba(20, 20);
+        canvas.set_fill_color(PaletteColor::new(1.0, 0.0, 0.0));
+        canvas.clip_to_image(&Gray8Image::uniform(1, 1, 255), Rect::new(40.0, 40.0, 1.0, 1.0));
+        canvas.clip_to_image(&Gray8Image::uniform(4, 4, 255), Rect::new(40.0, -10.0, 4.0, 4.0));
+        canvas.fill_rect(Rect::new(0.0, 0.0, 20.0, 20.0));
+        let image = canvas.snapshot();
+        for y in 0..20 {
+            for x in 0..20 {
+                assert_eq!(image.get(x, y), [0, 0, 0, 0], "pixel ({x}, {y})");
+            }
+        }
     }
 }
