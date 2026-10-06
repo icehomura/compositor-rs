@@ -170,19 +170,19 @@ impl Canvas {
     }
 
     pub fn translate(&mut self, dx: f64, dy: f64) {
-        self.state.ctm = AffineTransform::translation(dx, dy).concatenating(self.state.ctm);
+        self.state.ctm = self.state.ctm.concatenating(AffineTransform::translation(dx, dy));
     }
 
     pub fn scale(&mut self, sx: f64, sy: f64) {
-        self.state.ctm = AffineTransform::scale(sx, sy).concatenating(self.state.ctm);
+        self.state.ctm = self.state.ctm.concatenating(AffineTransform::scale(sx, sy));
     }
 
     pub fn rotate(&mut self, radians: f64) {
-        self.state.ctm = AffineTransform::rotation(radians).concatenating(self.state.ctm);
+        self.state.ctm = self.state.ctm.concatenating(AffineTransform::rotation(radians));
     }
 
     pub fn concatenate(&mut self, transform: AffineTransform) {
-        self.state.ctm = transform.concatenating(self.state.ctm);
+        self.state.ctm = self.state.ctm.concatenating(transform);
     }
 
     pub fn ctm(&self) -> AffineTransform {
