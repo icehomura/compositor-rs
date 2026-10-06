@@ -738,8 +738,13 @@ impl Render for AppRoot {
         self.sync_sheets(cx);
         self.observe_tabs(cx);
 
+        // The shortcuts sheet is centred on the window below its title bar.
+        let title_bar = f32::from(gpui_kit::component::TITLE_BAR_HEIGHT);
         let mut panels: Vec<AnyElement> = Vec::new();
-        if let Some(panel) = self.keyboard_shortcuts.render(window, cx) {
+        if let Some(panel) = self
+            .keyboard_shortcuts
+            .render(title_bar, f32::from(window.viewport_size().height) - title_bar, window, cx)
+        {
             panels.push(panel);
         }
         let mut sheets: Vec<AnyElement> = Vec::new();

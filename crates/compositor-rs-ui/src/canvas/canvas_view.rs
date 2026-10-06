@@ -179,6 +179,8 @@ struct ImageCache {
 struct ImageKey {
     document: Option<compositor_rs_core::Id>,
     size: Size,
+    /// The backing scale the raster was made at; the same view at another scale is another image.
+    device: f64,
     zoom: f64,
     pan: Size,
     brush_revision: u64,
@@ -429,6 +431,7 @@ impl CanvasView {
     fn raster(
         session: &Entity<EditorSession>,
         size: Size,
+        device: f64,
         cache: &Rc<RefCell<ImageCache>>,
         window: &mut Window,
         cx: &mut App,
@@ -441,6 +444,7 @@ impl CanvasView {
         let key = ImageKey {
             document: Some(document.id),
             size,
+            device,
             zoom: session.viewport.zoom(),
             pan: session.viewport.pan,
             brush_revision: session.brush_revision,
@@ -454,7 +458,11 @@ impl CanvasView {
             }
         }
         let viewport = session.viewport;
-        let mut target = Rgba8Image::new(size.width.max(1.0) as usize, size.height.max(1.0) as usize);
+        // `draw_view` draws screen pixels — the document at `zoom` device pixels per document
+        // pixel — so the raster is made `device` times the view's logical size and GPUI paints it
+        // back over those points (`paint_image` scales the bounds by the window's scale factor).
+        let pixels = Size::new(size.width * device, size.height * device);
+        let mut target = Rgba8Image::new(pixels.width.max(1.0) as usize, pixels.height.max(1.0) as usize);
         let state = CompositeState {
             mask_alone: session.mask_alone_layer().map(|layer| layer.id),
             foreground: session.foreground_color(),
@@ -462,10 +470,10 @@ impl CanvasView {
             active_layer: session.active_layer_id,
             ..CompositeState::default()
         };
-        Composite::draw_view(document, &viewport, size, &mut target, &state);
+        Composite::draw_view(document, &viewport, pixels, &mut target, &state);
         if session.pixel_grid_visible() {
             let mut canvas = Canvas::from_rgba(target);
-            let view = Rect::new(0.0, 0.0, size.width, size.height);
+            let view = Rect::new(0.0, 0.0, pixels.width, pixels.height);
             Composite::draw_pixel_grid(document, &viewport, view, &mut canvas);
             target = canvas.into_rgba();
         }
@@ -1220,7 +1228,7 @@ impl Render for CanvasView {
                                 cx.notify();
                             });
                         }
-                        CanvasView::raster(&session, size, &cache, window, cx)
+                        CanvasView::raster(&session, size, scale, &cache, window, cx)
                     },
                     move |bounds, image: Option<Arc<RenderImage>>, window, _cx| {
                         if let Some(image) = image {

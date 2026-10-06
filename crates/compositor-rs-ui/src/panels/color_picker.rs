@@ -687,9 +687,11 @@ impl ColorPickerPanelController {
         self.panel.is_visible()
     }
 
-    /// The panel for the host to draw at its window's root.
+    /// The panel for the host to draw at its window's root. The picker's window holds nothing but
+    /// this panel, so the whole of it is the space the panel is centred in.
     pub fn render(&mut self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        self.panel.render(window, cx)
+        let height = f32::from(window.viewport_size().height);
+        self.panel.render(0.0, height, window, cx)
     }
 
     /// Returns keyboard focus to the picker after a click on the canvas sampled a color.

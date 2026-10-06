@@ -86,6 +86,25 @@ exact validation rules (limits, cycles, dangling parents, unsafe paths, oversize
 * Keyboard/menu semantics (Undo/Redo rules, Escape cancels, Return commits, Tab cycles tool modes, `[`/`]` brush
   size, modifiers for selection add/subtract, ⌘-drag distort, Shift constraints) are preserved exactly.
 
+### gpui layout conventions
+
+Three shapes are deliberately not "whatever the flexbox default gives", because the port's gpui/taffy version
+answers them wrong (each was a shipped bug; keep them when touching this code):
+
+* **The editor's canvas row has a computed height.** `ContentView`'s row (rail, canvas, Layers panel) is given
+  `h(px(row_height))` — `viewport − title bar − tab strip − tool header − status bar`. A `flex_1` item of a
+  percentage-sized column is laid out against a zero flex basis here, and `.min_h(px(0.0))` then collapses the
+  whole row to zero: the canvas viewport and every panel inside it disappear. Do not reintroduce `flex_1`/`min_h(0)`
+  on that row or on the canvas area's inner row.
+* **Viewport rasters are made at device pixels.** `Composite::draw_view`/`draw_pixel_grid` draw screen pixels
+  (`zoom` device pixels per document pixel), so `CanvasView::raster` must allocate `logical size × window.scale_factor()`
+  and pass that device `Size` on — gpui's `paint_image` scales the element's bounds by the scale factor itself.
+  `ImageKey` therefore carries the scale it was made at. Any other rasterizer of a view must follow suit.
+* **Floating panels are centred by layout and remember an offset, not a corner.** `FloatingPanelController::render`
+  is handed the canvas row's box and centres the card in a flex container spanning it; the card hugs its content
+  (only a docked panel is forced to `DOCKED_WIDTH`), and `PanelState::position` is applied as a *relative* shift so
+  a drag translates the panel without disturbing the centring and reopens where it was left.
+
 ## 7. Verification
 
 * Pure-logic ports are covered by ports of `CompositorTests` (14k lines) — port the arithmetic assertions, not the

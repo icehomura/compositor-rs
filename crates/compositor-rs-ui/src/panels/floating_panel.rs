@@ -42,7 +42,9 @@ static FOCUS_HANDLES: LazyLock<Mutex<HashMap<SharedString, FocusHandle>>> =
 
 /// What a panel remembers for itself between frames: where it sits and its own focus.
 struct PanelState {
-    /// The panel's top-left corner in window coordinates.
+    /// The panel's offset from the spot it opens centred on. `(0, 0)` is dead centre of the canvas
+    /// area; the offset is applied as a relative shift, so a drag translates the panel and leaves
+    /// the centring alone.
     position: Point<Pixels>,
     /// Whether a position has been chosen yet (the first frame centres the panel).
     placed: bool,
@@ -71,8 +73,9 @@ pub struct FloatingPanelController {
     /// Hides the panel without reporting a close (`dismissing`).
     dismissing: bool,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
-    /// Where the title-bar drag picked the panel up, relative to its own corner.
-    grab: Rc<std::cell::Cell<Option<Point<Pixels>>>>,
+    /// Where the title-bar drag started: the pointer's window position and the panel's offset at
+    /// that moment, so the drag can translate the panel without knowing its measured size.
+    grab: Rc<std::cell::Cell<Option<(Point<Pixels>, Point<Pixels>)>>>,
 }
 
 impl FloatingPanelController {
@@ -139,24 +142,7 @@ impl FloatingPanelController {
     /// sliders are narrowed to fit this rather than the panel being widened to fit them.
     pub const DOCKED_WIDTH: f32 = 440.0;
 
-    /// The window point a panel opens centered on: the middle of the editor's canvas area.
-    ///
-    /// The AppKit walked the window's view tree for the canvas view; an overlay has no such lookup,
-    /// so the port uses the chrome widths the editor knows — the rail and divider on the left, the
-    /// Layers panel's remembered width on the right.
-    pub fn canvas_center(window: &Window, cx: &App) -> Point<Pixels> {
-        let viewport = window.viewport_size();
-        let left = tool_rail::WIDTH + 1.0;
-        let panel = compositor_rs_core::settings::int_value(
-            crate::content_view::LAYERS_PANEL_WIDTH_KEY,
-            crate::content_view::LAYERS_PANEL_DEFAULT_WIDTH as i64,
-        ) as f32;
-        let right = (f32::from(viewport.width) - panel).max(left + 1.0);
-        let _ = cx;
-        Point::new(px((left + right) / 2.0), viewport.height / 2.0)
-    }
-
-    /// `remember(_:)`: the panel's top-left corner is kept, so it reopens where it was left.
+    /// `remember(_:)`: the panel's offset is kept, so it reopens where it was left.
     /// A docked frame is copied from the document window; remembering it would put the next filter
     /// that shares this panel on that right edge.
     fn remember(&self, position: Point<Pixels>) {
@@ -180,7 +166,17 @@ impl FloatingPanelController {
     }
 
     /// The panel's own element, for the host to draw at the window's root. `None` while hidden.
-    pub fn render(&mut self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    ///
+    /// `row_top` and `row_height` are the canvas row's box inside the editor column — the space a
+    /// panel is centred in (the AppKit centred on the canvas view it looked up in the window's view
+    /// tree; the port is handed the same box by the editor).
+    pub fn render(
+        &mut self,
+        row_top: f32,
+        row_height: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
         let content = self.content.clone()?;
         if !self.visible {
             return None;
@@ -196,7 +192,9 @@ impl FloatingPanelController {
         let saved = POSITIONS.lock().get(&self.name).copied();
         let position = state.update(cx, |state, cx| {
             if !state.placed {
-                state.position = saved.unwrap_or_else(|| Self::canvas_center(window, cx));
+                // `position` is a drag offset from the centred place, so the first frame of an
+                // un-moved panel is that place itself.
+                state.position = saved.unwrap_or_default();
                 state.placed = true;
             }
             state.position
@@ -231,16 +229,16 @@ impl FloatingPanelController {
                 let state = this_state.clone();
                 let grab = grab.clone();
                 move |event: &MouseDownEvent, _, cx| {
-                    let panel = state.read(cx).position;
-                    grab.set(Some(event.position - panel));
+                    let offset = state.read(cx).position;
+                    grab.set(Some((event.position, offset)));
                 }
             })
             .on_drag(PanelDrag, |_, _, _, cx| cx.new(|_| PanelDragView))
             .on_drag_move::<PanelDrag>({
                 let grab = grab.clone();
                 move |event: &DragMoveEvent<PanelDrag>, _, cx| {
-                    let Some(grab) = grab.get() else { return };
-                    let position = event.event.position - grab;
+                    let Some((start_pointer, start_offset)) = grab.get() else { return };
+                    let position = start_offset + (event.event.position - start_pointer);
                     drag_state.update(cx, |state, cx| {
                         state.position = position;
                         cx.notify();
@@ -262,10 +260,11 @@ impl FloatingPanelController {
                     }),
             );
 
+        // The card hugs its content, as the AppKit panel took its `fittingSize`; only a docked
+        // panel is forced to the rail's width (Camera Raw's grading wheels).
         let card = v_flex()
             .id(ElementId::Name(format!("floating-panel-{}", self.name).into()))
             .track_focus(&focus)
-            .w(px(Self::DOCKED_WIDTH))
             .max_h(px(f32::from(viewport.height)))
             .rounded(px(8.0))
             .border_1()
@@ -273,7 +272,9 @@ impl FloatingPanelController {
             .bg(hsla(0.0, 0.0, 0.14, 0.98))
             .shadow_lg()
             .overflow_hidden()
-            .when(docked, |this| this.h(px(f32::from(viewport.height))))
+            .when(docked, |this| {
+                this.w(px(Self::DOCKED_WIDTH)).h(px(row_height))
+            })
             .on_mouse_down(MouseButton::Left, {
                 let focus = focus.clone();
                 move |_, window, cx| window.focus(&focus, cx)
@@ -281,16 +282,34 @@ impl FloatingPanelController {
             .child(header)
             .child(div().flex_1().min_h(px(0.0)).child(content));
 
-        Some(
-            deferred(
-                div()
-                    .absolute()
-                    .left(position.x)
-                    .top(position.y)
-                    .child(card),
-            )
-            .with_priority(2)
-            .into_any_element(),
-        )
+        // A docked panel is pinned to the window's right edge; otherwise the card is centred in
+        // the canvas area by layout (not by arithmetic), with `position` shifting it as a drag
+        // offset. Centring by layout is what keeps the panel inside the window: subtracting a
+        // guessed size instead clipped panels that were taller than the space left below centre.
+        let container = if docked {
+            div()
+                .absolute()
+                .left(px(f32::from(viewport.width) - Self::DOCKED_WIDTH))
+                .top(px(row_top))
+                .child(card)
+        } else {
+            let left = tool_rail::WIDTH + 1.0;
+            let panel_width = compositor_rs_core::settings::int_value(
+                crate::content_view::LAYERS_PANEL_WIDTH_KEY,
+                crate::content_view::LAYERS_PANEL_DEFAULT_WIDTH as i64,
+            ) as f32;
+            let canvas_width = (f32::from(viewport.width) - panel_width - left).max(1.0);
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(row_top))
+                .w(px(canvas_width))
+                .h(px(row_height))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().relative().left(position.x).top(position.y).child(card))
+        };
+        Some(deferred(container).with_priority(2).into_any_element())
     }
 }

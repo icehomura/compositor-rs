@@ -30,8 +30,8 @@ use crate::tool_controls::lasso::LassoControls;
 use crate::tool_controls::navigation::NavigationToolHeader;
 use crate::tool_controls::shape::ShapeControls;
 use crate::tool_controls::type_tool::TypeControls;
-use crate::tool_header::{tool_header_title_bar, ToolHeaderStyle, TOOL_HEADER_PADDING};
-use crate::toolbar::status_bar::StatusBar;
+use crate::tool_header::{tool_header_title_bar, ToolHeaderStyle, TOOL_HEADER_HEIGHT, TOOL_HEADER_PADDING};
+use crate::toolbar::status_bar::{self, StatusBar};
 use crate::toolbar::tool_rail::ToolRail;
 use crate::widgets::indicatorless_scroll::IndicatorlessScrollView;
 
@@ -321,7 +321,13 @@ impl ContentView {
     }
 
     /// The panel each sheet is shown in.
-    fn panels(&mut self, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    fn panels(
+        &mut self,
+        row_top: f32,
+        row_height: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
         [
             &mut self.levels_panel,
             &mut self.adjustment_panel,
@@ -331,7 +337,7 @@ impl ContentView {
             &mut self.filter_panel,
         ]
         .into_iter()
-        .filter_map(|panel| panel.render(window, cx))
+        .filter_map(|panel| panel.render(row_top, row_height, window, cx))
         .collect()
     }
 
@@ -461,10 +467,20 @@ impl ContentView {
 impl Render for ContentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.open_sheets(window, cx);
+        let tool = self.session.read(cx).tool;
+        // The canvas row's height is computed, not left to `flex_1`: in this gpui/taffy version a
+        // flex item of a percentage-sized column is laid out against a zero flex basis, which
+        // collapses the row's subtree — the canvas viewport and every panel in it — to nothing.
+        // The row is the space between the tool header and the status bar.
+        let editor_height = (f32::from(window.viewport_size().height)
+            - f32::from(gpui_kit::component::TITLE_BAR_HEIGHT)
+            - crate::workspace::TAB_STRIP_HEIGHT)
+            .max(MIN_HEIGHT);
+        let header_height = if Self::has_header(tool) { TOOL_HEADER_HEIGHT } else { 0.0 };
+        let row_height = (editor_height - header_height - status_bar::HEIGHT).max(0.0);
         // The panels' own elements are drawn last, so they sit over the editor (`FloatingPanelController`).
-        let panels = self.panels(window, cx);
+        let panels = self.panels(header_height, row_height, window, cx);
         let session = self.session.read(cx);
-        let tool = session.tool;
         let has_document = session.document.is_some();
         let shows_rulers = session.shows_rulers && has_document;
         let mask_alone = session.mask_alone_layer().map(|layer| layer.name.clone());
@@ -543,7 +559,6 @@ impl Render for ContentView {
                     .flex()
                     .flex_row()
                     .flex_1()
-                    .min_h(px(0.0))
                     .when(shows_rulers, |this| {
                         this.child(CanvasRulerView::new(self.session.clone(), CanvasGuideAxis::Vertical).into_any_element())
                     })
@@ -559,7 +574,11 @@ impl Render for ContentView {
                                         .absolute()
                                         .top_0()
                                         .left_0()
-                                        .size_full()
+                                        .right_0()
+                                        .bottom_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
                                         .child(self.new_canvas_sheet.clone()),
                                 )
                             })
@@ -592,8 +611,7 @@ impl Render for ContentView {
                 div()
                     .flex()
                     .flex_row()
-                    .flex_1()
-                    .min_h(px(0.0))
+                    .h(px(row_height))
                     .child(self.tool_rail.clone())
                     .child(divider())
                     .child(canvas_area)
