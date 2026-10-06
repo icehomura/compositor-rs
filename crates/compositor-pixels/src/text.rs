@@ -255,6 +255,20 @@ pub fn resolved_font_name(name: &str) -> Option<String> {
     LIBRARY.installed_face(name).map(|id| LIBRARY.post_script_name(id))
 }
 
+/// Every installed face's PostScript name, sorted, the way `NSFontManager.shared.availableFonts`
+/// lists them (`TypeFontPicker.menuNeedsUpdate`).
+pub fn font_names() -> Vec<String> {
+    let mut names: Vec<String> = LIBRARY
+        .database
+        .faces()
+        .map(|face| face.post_script_name.clone())
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// The face `name` is set in, at `size`: the installed face, else the system font
 /// (`NSFont(name:size:) ?? NSFont.systemFont(ofSize:)`).
 fn resolve_face(name: &str, size: f64) -> Face {
