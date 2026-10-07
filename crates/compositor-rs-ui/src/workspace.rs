@@ -19,8 +19,10 @@ use compositor_rs_session::EditorSession;
 use crate::content_view::ContentView;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::Icon;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -33,6 +35,14 @@ pub const PROJECT_TAB_SPACING: f64 = 6.0;
 pub const TAB_PILL_HEIGHT: f32 = 28.0;
 /// The strip's height (`frame(height: 34)`).
 pub const TAB_STRIP_HEIGHT: f32 = 34.0;
+
+/// The width the toolbar keeps for the New canvas button and the zoom controls, so the strip it sizes
+/// is `windowWidth - 352` (`ContentView.toolbar`), never narrower than 200.
+pub const TOOLBAR_CHROME_WIDTH: f64 = 352.0;
+pub const TOOLBAR_STRIP_MIN_WIDTH: f64 = 200.0;
+/// A toolbar button's own height and the gap between the New canvas button and the strip.
+const TOOLBAR_BUTTON_HEIGHT: f32 = 22.0;
+const TOOLBAR_SPACING: f32 = 8.0;
 /// A pill's leading and trailing padding, the close button and the gap after it (`projectTabPillWidth`).
 pub const TAB_PILL_CHROME: f64 = 40.0;
 /// A label's bounds (`projectTabLabelWidth`).
@@ -888,16 +898,26 @@ impl ProjectTabStrip {
 
 impl Render for ProjectTabStrip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The strip spans the window (`w_full`), so its width is the viewport's: this is the port's
-        // substitute for reading the strip's own laid-out bounds (`onGeometryChange`).
+        // The strip is laid out at the width the toolbar gives it — `max(200, windowWidth - 352)` in
+        // `ContentView.toolbar` — not the viewport's: the New canvas button and the zoom controls sit
+        // in this same row, either side of it.
         let viewport_width = f64::from(f32::from(window.viewport_size().width));
-        if (viewport_width - self.slot_width).abs() > 0.5 {
-            self.slot_width = viewport_width;
+        let slot_width = (viewport_width - TOOLBAR_CHROME_WIDTH).max(TOOLBAR_STRIP_MIN_WIDTH);
+        if (slot_width - self.slot_width).abs() > 0.5 {
+            self.slot_width = slot_width;
         }
         let layout = self.overflow(cx, self.slot_width);
         let workspace = self.workspace.read(cx);
         let selected = workspace.selected_id();
         let can_switch = workspace.can_switch(cx);
+        let session = workspace.current().session.clone();
+        let (new_canvas_disabled, no_document) = {
+            let session = session.read(cx);
+            (
+                session.is_importing || session.shows_busy || session.levels.is_some(),
+                session.document.is_none(),
+            )
+        };
         let tabs: Vec<AnyElement> = layout
             .visible
             .iter()
@@ -906,7 +926,6 @@ impl Render for ProjectTabStrip {
                 let active = slot.id == selected;
                 let modified = tab.session.read(cx).is_modified();
                 let title = tab.title(cx);
-                let label = if modified { format!("• {title}") } else { title };
                 let id = slot.id;
                 let workspace = self.workspace.clone();
                 let close = cx.listener(move |this, _, _, cx| {
@@ -925,33 +944,59 @@ impl Render for ProjectTabStrip {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(5.0))
                         .pl(px(11.0))
-                        .pr(px(8.0))
                         .rounded_full()
                         .bg(if active {
                             hsla(0.0, 0.0, 1.0, 0.12)
                         } else {
-                            hsla(0.0, 0.0, 1.0, 0.04)
+                            hsla(0.0, 0.0, 1.0, 0.035)
+                        })
+                        // `Capsule().strokeBorder(Color.white.opacity(active ? 0.22 : 0.08))`.
+                        .border_1()
+                        .border_color(if active {
+                            hsla(0.0, 0.0, 1.0, 0.22)
+                        } else {
+                            hsla(0.0, 0.0, 1.0, 0.08)
                         })
                         .when(active, |this| this.text_color(hsla(0.0, 0.0, 1.0, 0.95)))
                         .when(!active, |this| this.text_color(hsla(0.0, 0.0, 1.0, 0.72)))
                         .when(!can_switch, |this| this.opacity(0.5))
                         .child(
                             div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(5.0))
+                                .pr(px(8.0))
                                 .flex_1()
                                 .overflow_hidden()
-                                .text_size(px(12.0))
-                                .when(active, |this| this.font_weight(FontWeight::SEMIBOLD))
-                                .child(label),
+                                // `if tab.session.isModified { Circle().frame(width: 5, height: 5) }`.
+                                .when(modified, |this| {
+                                    this.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(if active {
+                                        hsla(0.0, 0.0, 1.0, 0.95)
+                                    } else {
+                                        hsla(0.0, 0.0, 1.0, 0.72)
+                                    }))
+                                })
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                                        .child(title.clone()),
+                                ),
                         )
                         .child(
-                            Button::new(format!("tab-close-{}", slot.id))
-                                .icon(Icon::new(IconName::X))
-                                .tooltip("Close Project")
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .on_click(close),
+                            // `Image(systemName: "xmark")` 9 pt semibold in a 16×28 frame, then 5 pt of
+                            // trailing padding.
+                            div().pr(px(5.0)).child(
+                                Button::new(format!("tab-close-{}", slot.id))
+                                    .icon(Icon::new(IconName::X).size(px(9.0)))
+                                    .tooltip(format!("Close {title}"))
+                                    .disabled(!can_switch)
+                                    .w(px(16.0))
+                                    .h(px(TAB_PILL_HEIGHT))
+                                    .on_click(close),
+                            ),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -973,29 +1018,64 @@ impl Render for ProjectTabStrip {
         let overflow_pill: Option<AnyElement> = layout.pill.map(|pill| {
             let hidden = layout.hidden_ids.clone();
             let label = project_tab_overflow_label(hidden.len());
+            let workspace = self.workspace.clone();
+            // The anchored menu lists the hidden tabs in their real order; a modified tab keeps the
+            // textual bullet (the pill *label* draws a circle, this list does not).
+            let items: Vec<(Id, String)> = hidden
+                .iter()
+                .filter_map(|id| {
+                    let tab = workspace.read(cx).tab(*id)?;
+                    let title = tab.title(cx);
+                    let modified = tab.session.read(cx).is_modified();
+                    Some((*id, if modified { format!("• {title}") } else { title }))
+                })
+                .collect();
             div()
                 .absolute()
                 .left(px(pill.x as f32))
                 .top(px(3.0))
-                .w(px(pill.width as f32))
-                .h(px(TAB_PILL_HEIGHT))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .px(px(11.0))
-                .rounded_full()
-                .bg(hsla(0.0, 0.0, 1.0, 0.035))
-                .text_size(px(12.0))
-                .text_color(hsla(0.0, 0.0, 1.0, 0.72))
-                .when(!can_switch, |this| this.opacity(0.5))
-                .child(div().child(label.clone()))
-                .child(Icon::new(IconName::ChevronDown).size(px(9.0)))
-                .id("project-tab-overflow")
-                .tooltip({
-                    let label = label.clone();
-                    move |window, cx| Tooltip::new(label.clone()).build(window, cx)
-                })
+                .child(
+                    Button::new("project-tab-overflow")
+                        .h(px(TAB_PILL_HEIGHT))
+                        .w(px(pill.width as f32))
+                        .px(px(11.0))
+                        .rounded_full()
+                        .bg(hsla(0.0, 0.0, 1.0, 0.035))
+                        .border_1()
+                        .border_color(hsla(0.0, 0.0, 1.0, 0.08))
+                        .when(!can_switch, |this| this.opacity(0.5))
+                        .disabled(!can_switch)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .text_size(px(12.0))
+                                .text_color(hsla(0.0, 0.0, 1.0, 0.72))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(label.clone()),
+                                )
+                                .child(Icon::new(IconName::ChevronDown).size(px(9.0))),
+                        )
+                        .tooltip(label.clone())
+                        .dropdown_menu(move |menu, _, _| {
+                            items.iter().fold(menu, |menu, (id, label)| {
+                                let id = *id;
+                                let workspace = workspace.clone();
+                                menu.item(
+                                    PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| {
+                                        workspace.update(cx, |workspace, cx| {
+                                            workspace.select(id, cx);
+                                            cx.notify();
+                                        });
+                                    }),
+                                )
+                            })
+                        }),
+                )
                 .into_any_element()
         });
 
@@ -1004,6 +1084,9 @@ impl Render for ProjectTabStrip {
         div()
             .id("project-tab-strip")
             .relative()
+            .flex()
+            .flex_row()
+            .items_center()
             .h(px(TAB_STRIP_HEIGHT))
             .w_full()
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -1019,6 +1102,30 @@ impl Render for ProjectTabStrip {
                 cx.listener(|this, _: &MouseUpEvent, _, cx| this.commit_reorder(cx)),
             )
             .child(
+                // `ToolbarItem(placement: .navigation)`: New canvas, then the strip the toolbar sizes.
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .pr(px(TOOLBAR_SPACING))
+                    .child(
+                        Button::new("newCanvasToolbar")
+                            .ghost()
+                            .icon(Icon::new(IconName::Plus).size(px(12.0)))
+                            .label("New canvas")
+                            .text_size(px(12.0))
+                            .h(px(TOOLBAR_BUTTON_HEIGHT))
+                            .tooltip("New canvas (⌘N)")
+                            .disabled(new_canvas_disabled)
+                            .px(px(6.0))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::NewCanvas), cx);
+                            }),
+                    ),
+            )
+            .child(
+                // Only as wide as the tabs drawn: the rest of the strip's budget is the window drag,
+                // as `TitleBarDragArea` is inside the strip in the Swift.
                 div()
                     .relative()
                     .w(px(content_width as f32))
@@ -1039,6 +1146,71 @@ impl Render for ProjectTabStrip {
                             cx.stop_propagation();
                         }
                     }),
+            )
+            .child(
+                // `ToolbarSpacer(.flexible)` … `ToolbarItem(placement: .primaryAction)`.
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(
+                        Button::new("fitCanvas")
+                            .ghost()
+                            .label("Fit")
+                            .text_size(px(12.0))
+                            .h(px(TOOLBAR_BUTTON_HEIGHT))
+                            .px(px(4.0))
+                            .tooltip("Fit canvas in window (⌘0)")
+                            .disabled(no_document)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::FitCanvas), cx);
+                            }),
+                    )
+                    .child(
+                        Button::new("actualPixels")
+                            .ghost()
+                            .label("100%")
+                            .text_size(px(12.0))
+                            .h(px(TOOLBAR_BUTTON_HEIGHT))
+                            .px(px(4.0))
+                            .tooltip("Actual pixels (⌘1)")
+                            .disabled(no_document)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::ActualPixels), cx);
+                            }),
+                    )
+                    .child(
+                        // `HStack(spacing: 0)` of the two magnifying-glass buttons.
+                        div()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .px(px(4.0))
+                            .child(
+                                Button::new("zoomIn")
+                                    .ghost()
+                                    .icon(Icon::new(IconName::ZoomIn).size(px(13.0)))
+                                    .h(px(TOOLBAR_BUTTON_HEIGHT))
+                                    .w(px(TOOLBAR_BUTTON_HEIGHT))
+                                    .tooltip("Zoom in (⌘+)")
+                                    .disabled(no_document)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::actions::ZoomIn), cx);
+                                    }),
+                            )
+                            .child(
+                                Button::new("zoomOut")
+                                    .ghost()
+                                    .icon(Icon::new(IconName::ZoomOut).size(px(13.0)))
+                                    .h(px(TOOLBAR_BUTTON_HEIGHT))
+                                    .w(px(TOOLBAR_BUTTON_HEIGHT))
+                                    .tooltip("Zoom out (⌘−)")
+                                    .disabled(no_document)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::actions::ZoomOut), cx);
+                                    }),
+                            ),
+                    ),
             )
     }
 }
