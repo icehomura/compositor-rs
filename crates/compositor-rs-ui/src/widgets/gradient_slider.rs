@@ -32,7 +32,7 @@ use super::slider_snap::{SliderGeometry, clamped};
 pub const GLIDE_DURATION: Duration = Duration::from_millis(180);
 
 /// The height of a track bar (`GradientSliderCell.drawBar`).
-pub const TRACK_HEIGHT: f32 = 4.0;
+pub const TRACK_HEIGHT: f32 = 6.0;
 
 /// The knob's size, the same 16 points gpui-component's sliders draw.
 pub const KNOB_SIZE: f32 = 16.0;

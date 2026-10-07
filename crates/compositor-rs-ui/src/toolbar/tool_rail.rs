@@ -146,6 +146,7 @@ impl Render for ToolRail {
             div()
                 .flex()
                 .flex_col()
+                .items_center()
                 .gap(px(SPACING))
                 .pt(px(16.0))
                 .pb(px(12.0))

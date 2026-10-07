@@ -31,7 +31,7 @@ use gpui_kit::Point as WindowPoint;
 use crate::canvas::overlays::palette_rgba_alpha;
 
 /// The ants' dash (`lengths: [4, 4]`), the pattern's width, and how far each tick steps it.
-const ANTS_DASH: [f32; 2] = [4.0, 4.0];
+const ANTS_DASH: [f32; 2] = [3.0, 3.0];
 /// The marching-ants timer's period (`Timer(timeInterval: 0.12)`), and the cycle it steps through.
 const ANTS_PERIOD: f64 = 0.12;
 const ANTS_CYCLE: f64 = 8.0;
@@ -579,8 +579,18 @@ fn paint_selection(
         return;
     };
     let subpaths = flatten(path, &transform);
-    let white: Rgba = gpui_kit::white().into();
-    let black: Rgba = gpui_kit::black().into();
+    let white = Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 0.72,
+    };
+    let black = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.58,
+    };
     let polylines: Vec<Vec<WindowPoint<Pixels>>> = subpaths
         .iter()
         .map(|subpath| {
