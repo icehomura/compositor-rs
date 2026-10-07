@@ -19,9 +19,8 @@ use compositor_rs_core::guides::{CanvasGuide, CanvasGuideAxis};
 use compositor_rs_core::layer_transform::{LayerTransform, TransformDrag, TransformDragMode, TransformSnap};
 use compositor_rs_core::selection::{LassoKind, SelectionMode};
 use compositor_rs_core::Rgba8Image;
-use compositor_rs_io::image_exporter::{shared, ExportRaster, ImageExporter};
 use compositor_rs_pixels::canvas::Canvas;
-use compositor_rs_render::composite::{Composite, CompositeState};
+use compositor_rs_render::composite::{Composite, CompositeState, EditStroke};
 use compositor_rs_session::crop::{CropDrag, CropDragMode, CropSnap};
 use compositor_rs_session::projects::SessionHost;
 use compositor_rs_session::EditorSession;
@@ -171,9 +170,34 @@ pub fn picking(session: &EditorSession) -> bool {
 }
 
 /// The raster the canvas paints, remembered so a frame that changed nothing does not composite again.
+// TEMP-PERF: append a timestamped line to one shared timeline file.
+fn perf(line: &str) {
+    if std::env::var_os("TEMP_PERF").is_none() {
+        return;
+    }
+    use std::io::Write as _;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("D:/workspace/rust/compositor-rs/target/temp_perf_frames.txt")
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "{now} {line}");
+    }
+}
+
 struct ImageCache {
     key: Option<ImageKey>,
     image: Option<Arc<RenderImage>>,
+    /// The rasters before `image`, newest first. A replacement keeps one frame's worth around —
+    /// the previous frame's scene may still name it — and hands everything older back to the
+    /// window so its atlas texture is freed: a resize drag makes a raster per frame, and one
+    /// viewport-sized texture per frame would otherwise pile up in the atlas for the session's
+    /// whole life.
+    stale: Vec<Arc<RenderImage>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -248,6 +272,7 @@ impl CanvasView {
             cache: Rc::new(RefCell::new(ImageCache {
                 key: None,
                 image: None,
+                stale: Vec::new(),
             })),
             drag: None,
             space_held: false,
@@ -437,6 +462,8 @@ impl CanvasView {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Arc<RenderImage>> {
+        let t_start = std::time::Instant::now(); // TEMP-PERF
+        perf("raster_start"); // TEMP-PERF
         let session = session.read(cx);
         let document = session.document.as_ref()?;
         if size.width < 1.0 || size.height < 1.0 {
@@ -459,6 +486,28 @@ impl CanvasView {
             }
         }
         let viewport = session.viewport;
+        // Keep the in-progress brush visible in the same raster that is presented to GPUI. The
+        // session stroke owns mutable tile canvases, so only publish immutable patch images for
+        // this frame; the edit is dropped before the next input event can mutate those tiles.
+        let stroke_patches = session.brush_stroke.as_ref().map(|stroke| stroke.patches());
+        let edit_stroke = session.brush_stroke.as_ref().zip(stroke_patches.as_deref()).map(
+            |(stroke, patches)| EditStroke {
+                layer: stroke.layer.id,
+                is_mask: stroke.is_mask,
+                width: stroke.width,
+                height: stroke.height,
+                source_rect: stroke.source_rect,
+                patches,
+                paint_transform: stroke.paint_transform,
+                mask_background: stroke.mask_background,
+            },
+        );
+        perf(&format!(
+            "brush_state revision={} active={} patches={}",
+            session.brush_revision,
+            edit_stroke.is_some(),
+            stroke_patches.as_ref().map_or(0, Vec::len),
+        ));
         // `draw_view` draws screen pixels — the document at `zoom` device pixels per document
         // pixel — so the raster is made `device` times the view's logical size and GPUI paints it
         // back over those points (`paint_image` scales the bounds by the window's scale factor).
@@ -466,6 +515,7 @@ impl CanvasView {
         let mut target = Rgba8Image::new(pixels.width.max(1.0) as usize, pixels.height.max(1.0) as usize);
         let state = CompositeState {
             mask_alone: session.mask_alone_layer().map(|layer| layer.id),
+            stroke: edit_stroke.as_ref(),
             foreground: session.foreground_color(),
             shape_line_width: session.shape_line_width,
             active_layer: session.active_layer_id,
@@ -476,22 +526,42 @@ impl CanvasView {
             }),
             ..CompositeState::default()
         };
+        let t_draw = std::time::Instant::now();
         Composite::draw_view(document, &viewport, pixels, &mut target, &state);
+        let d_draw = t_draw.elapsed();
         if session.pixel_grid_visible() {
             let mut canvas = Canvas::from_rgba(target);
             let view = Rect::new(0.0, 0.0, pixels.width, pixels.height);
             Composite::draw_pixel_grid(document, &viewport, device, view, &mut canvas);
             target = canvas.into_rgba();
         }
-        // GPUI paints `RenderImage`s; the pixels reach it as PNG, the one image format the toolkit
-        // takes without an image-crate dependency (`Image::from_bytes` + `use_render_image`).
-        let raster = ExportRaster::new(shared(target));
-        let bytes = ImageExporter::png_data(&raster).ok()?;
-        let image = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
-        let render_image = image.use_render_image(window, cx)?;
+        // GPUI paints `RenderImage`s, and their textures take BGRA — the very swap the toolkit's
+        // own PNG decoder makes. Handing it the raster's pixels directly spares the encode and the
+        // background decode the port used to do every frame (`Image::from_bytes` +
+        // `use_render_image`, whose first call returns `None` while that decode runs — and the
+        // early return there composited the whole view a second time before the frame was drawn).
+        let (width, height) = (target.width(), target.height());
+        let mut data = target.into_data();
+        for pixel in data.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let buffer = image::RgbaImage::from_raw(width as u32, height as u32, data)?;
+        let render_image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
+        // TEMP-PERF
+        perf(&format!(
+            "raster_end {width}x{height} draw={:?} total={:?}",
+            d_draw,
+            t_start.elapsed()
+        ));
         let mut cache = cache.borrow_mut();
         cache.key = Some(key);
-        cache.image = Some(render_image.clone());
+        if let Some(previous) = cache.image.replace(render_image.clone()) {
+            cache.stale.push(previous);
+        }
+        while cache.stale.len() > 1 {
+            let stale = cache.stale.remove(0);
+            let _ = window.drop_image(stale);
+        }
         Some(render_image)
     }
 
@@ -1242,7 +1312,9 @@ impl Render for CanvasView {
                     },
                     move |bounds, image: Option<Arc<RenderImage>>, window, _cx| {
                         if let Some(image) = image {
+                            perf("paint_image_begin"); // TEMP-PERF
                             let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
+                            perf("paint_image_end"); // TEMP-PERF
                         }
                     },
                 )
