@@ -147,6 +147,9 @@ struct AppRoot {
     /// The app's Color Picker, while the picker has to float above a dialog. The editor hosts its
     /// own panel for the colors that are sampled from the canvas (`ContentView`).
     color_picker: ColorPickerPanelController,
+    /// The tab whose import panel is up (`session.showsImporter`), so the render pass that sees the
+    /// flag starts the panel exactly once.
+    importing: Option<Id>,
     /// `ProjectController.exportJPEG`'s sheet, while its card is up.
     jpeg_export: Option<Entity<JpegExportSheet>>,
     /// `ProjectTabs`' PSD conversion sheet, shown while the session says so.
@@ -173,6 +176,7 @@ impl AppRoot {
             observed: HashMap::new(),
             keyboard_shortcuts: FloatingPanelController::new("keyboardShortcuts"),
             color_picker: ColorPickerPanelController::new(),
+            importing: None,
             jpeg_export: None,
             psd_conversion: None,
             raw_develop: None,
@@ -279,6 +283,53 @@ impl AppRoot {
             return None;
         }
         Some(session)
+    }
+
+    /// File > Import Images…: `CompositorApp.swift:70` sets the flag; the render pass below opens the
+    /// panel, because the sheet's "Import image" asks for the same panel the same way.
+    fn request_import(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.current_session(cx, false) {
+            session.update(cx, |session, _| session.shows_importer = true);
+        }
+    }
+
+    /// `ContentView.fileImporter(isPresented: $session.showsImporter, …)`: while a session asks for
+    /// the image panel, open it and hand what it returns to `importImages`.
+    fn sync_importer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.importing.is_some() {
+            return;
+        }
+        let Some(session) = self.current_session(cx, false) else { return };
+        if !session.read(cx).shows_importer {
+            return;
+        }
+        let id = self.workspace.read(cx).current().id;
+        self.importing = Some(id);
+        let host = self.host.clone();
+        let weak = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let outcome = prompt::import_panel(cx).await;
+                let _ = weak.update(cx, |root, cx| {
+                    root.importing = None;
+                    cx.notify();
+                });
+                let (paths, error) = match outcome {
+                    Ok(paths) => (paths, None),
+                    Err(message) => (Vec::new(), Some(message)),
+                };
+                let _ = cx.update(|_window, cx| {
+                    session.update(cx, |session, _| {
+                        session.shows_importer = false;
+                        match error {
+                            Some(message) => session.import_error = Some(message),
+                            None if !paths.is_empty() => session.import_images(&paths, None, host.as_ref()),
+                            None => {}
+                        }
+                    });
+                });
+            })
+            .detach();
     }
 
     /// `application(_:open:)` and the window's file drop: a `.comp` opens as a project, anything
@@ -728,6 +779,9 @@ impl AppRoot {
         bind!(actions::CloseProject, |root, _action, window, cx| {
             root.close_project(window, cx);
         });
+        bind!(actions::ImportImages, |root, _action, _window, cx| {
+            root.request_import(cx);
+        });
         bind!(actions::CheckForUpdates, |root, _action, window, cx| {
             root.check_for_updates(window, cx);
         });
@@ -749,10 +803,63 @@ impl AppRoot {
     }
 }
 
+
+// TEMP-PERF: append a timestamped line to one shared timeline file.
+fn perf(line: &str) {
+    if std::env::var_os("TEMP_PERF").is_none() {
+        return;
+    }
+    use std::io::Write as _;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("D:/workspace/rust/compositor-rs/target/temp_perf_frames.txt")
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "{now} {line}");
+    }
+}
+
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // TEMP-PERF
+        perf("render_start");
+        let min = std::env::var("PERF_MIN").is_ok();
+        if std::env::var("PERF_LOOP").is_ok() {
+            // TEMP-PERF: force a continuous frame loop, so frame intervals are the frame's cost.
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static SPAWNED: AtomicBool = AtomicBool::new(false);
+            if !SPAWNED.swap(true, Ordering::SeqCst) {
+                // TEMP-PERF: with PERF_EDIT the content revision moves without anything else
+                // changing, which is what dragging a layer's handle makes the canvas do.
+                let edit = std::env::var("PERF_EDIT").is_ok();
+                cx.spawn_in(window, async move |this, cx| loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(1))
+                        .await;
+                    let updated = this.update(cx, |root, cx| {
+                        if edit {
+                            if let Some(session) = root.current_session(cx, false) {
+                                session.update(cx, |session, _| {
+                                    session.brush_revision = session.brush_revision.wrapping_add(1);
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                    if updated.is_err() {
+                        return;
+                    }
+                })
+                .detach();
+            }
+        }
         self.sync_menus(cx);
         self.sync_sheets(cx);
+        self.sync_importer(window, cx);
         self.sync_color_picker(window, cx);
         self.observe_tabs(cx);
 
@@ -806,12 +913,51 @@ impl Render for AppRoot {
                     .child(div().flex_1().child(self.view.clone()))
                     .children(panels),
             )
-            .children(overlay);
+            .children(overlay)
+            // TEMP-PERF: a zero-size element painted last, to mark where the app's own painting
+            // stops and the toolkit's frame ends.
+            .child(
+                gpui_kit::gpui::canvas(
+                    |_, _, _| {},
+                    |_, _, _, _| perf("paint_last"),
+                )
+                .absolute()
+                .size(px(0.0)),
+            );
 
         // Action listeners live for one frame; the root element installs them as it paints.
         Self::register_actions(&cx.entity(), &mut root_el);
         commands::register(&mut root_el, cx, self.workspace.clone(), self.host.clone());
-        root_el
+        // TEMP-PERF
+        perf("render_end");
+        if min {
+            // TEMP-PERF: a minimal tree, to see whether frame cost tracks the app's own painting.
+            {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static SPAWNED: AtomicBool = AtomicBool::new(false);
+                if !SPAWNED.swap(true, Ordering::SeqCst) {
+                    cx.spawn_in(window, async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1))
+                            .await;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
+                    })
+                    .detach();
+                }
+            }
+            return div()
+                .size_full()
+                .bg(gpui_kit::gpui::black())
+                .child(
+                    gpui_kit::gpui::canvas(|_, _, _| {}, |_, _, _, _| perf("paint_last"))
+                        .absolute()
+                        .size(px(0.0)),
+                )
+                .into_any_element();
+        }
+        root_el.into_any_element()
     }
 }
 
