@@ -949,6 +949,11 @@ fn modifier_bits(modifiers: &Modifiers) -> i32 {
 mod tests {
     use super::*;
 
+    /// The settings store is one file for the whole process, so the tests that write to it take turns.
+    /// The round trip below turns `set_testing` off, and a sibling test writing during that window would
+    /// leak its map into the round trip's read.
+    static STORAGE: Mutex<()> = Mutex::new(());
+
     /// The table is the Swift table: 113 entries, in its order, chords included.
     #[test]
     fn the_table_is_the_swifts_table() {
@@ -1272,6 +1277,7 @@ mod tests {
     /// chord of the table's own answers first, and a reassigned base key no longer falls back.
     #[test]
     fn shift_falls_back_to_the_base_canvas_key() {
+        let _guard = STORAGE.lock();
         let bound = |settings: &ShortcutSettings, name: &str| -> Vec<String> {
             settings
                 .bindings()
@@ -1339,6 +1345,7 @@ mod tests {
     /// `menu` and `native` answer with the chord in force; a reassignment moves both.
     #[test]
     fn menu_and_native_look_the_original_chord_up() {
+        let _guard = STORAGE.lock();
         let mut settings = ShortcutSettings::default();
         assert_eq!(
             settings.menu('z', Modifiers::command()),
@@ -1394,8 +1401,7 @@ mod tests {
     #[test]
     fn override_map_round_trips_through_the_settings_store() {
         // `set_testing` is process-wide, so this test does not share it with another in this module.
-        static STORE: Mutex<()> = Mutex::new(());
-        let _guard = STORE.lock();
+        let _guard = STORAGE.lock();
 
         settings::set_testing(true);
         assert_eq!(settings::json_value(ShortcutSettings::STORAGE_KEY), None);
