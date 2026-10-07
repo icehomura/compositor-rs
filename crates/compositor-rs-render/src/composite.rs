@@ -12,6 +12,25 @@
 //! Order, folder opacity, visibility inheritance, masks and clipping masks are the document's
 //! (`compositor_rs_core::groups`); what lives here is the drawing.
 
+// TEMP-PERF: append a timestamped line to one shared timeline file.
+fn perf(line: &str) {
+    if std::env::var_os("TEMP_PERF").is_none() {
+        return;
+    }
+    use std::io::Write as _;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("D:/workspace/rust/compositor-rs/target/temp_perf_frames.txt")
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "{now} {line}");
+    }
+}
+
 use compositor_rs_core::blend::LayerBlendMode;
 use compositor_rs_core::color::PaletteColor;
 use compositor_rs_core::document::{CanvasDocument, ImageLayer};
@@ -40,6 +59,43 @@ use std::sync::Arc;
 
 use crate::adjustment_surface::AdjustmentApply;
 use crate::downsample_cache::DownsampleCache;
+
+// The document's shadow is a blurred black rectangle, and the blur is the most expensive thing the
+// frame does — a megapixel of it every time the frame is redrawn. Nothing about it depends on the
+// frame, though: only on the document's rect, the backing scale and the radius. A window resize or a
+// layer drag moves neither, so the sprites are kept and reused until the document itself moves.
+//
+// Sprite is the *unclipped* blur box: `CIImage(color:).cropped(to: rect).applyingGaussianBlur` blurs
+// against transparent surroundings, so the tail is carried past the frame's edge instead of being
+// edge-extended to it. A box beyond [`SHADOW_SPRITE_PIXELS`] is cropped to the frame first, which is
+// what the port did everywhere — a zoomed-in document's box is far larger than the window.
+//
+// The document's phase against the pixel grid takes only a few values (a centred view moves it by
+// half a pixel at a time), so a handful of sprites covers a whole resize drag.
+const SHADOW_SPRITES: usize = 4;
+const SHADOW_SPRITE_PIXELS: f64 = 4_000_000.0;
+
+thread_local! {
+    static SHADOW_SPRITES_CACHE: std::cell::RefCell<Vec<ShadowSprite>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What a [`ShadowSprite`] is only valid for. Held as bit patterns: the sprite's bytes have to match
+/// the request exactly, and a rounded comparison could reuse one that is a pixel out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ShadowKey {
+    width: u64,
+    height: u64,
+    sigma: u64,
+    device: u64,
+    phase_x: u64,
+    phase_y: u64,
+}
+
+struct ShadowSprite {
+    key: ShadowKey,
+    image: Rgba8Image,
+}
 use crate::layer_renderer::{canvas_quality, LayerRenderer};
 use crate::live_mask_renderer::MaskClip;
 use crate::tiled_layer_renderer::TiledLayerRenderer;
@@ -286,49 +342,88 @@ impl Composite {
         let mut canvas = Canvas::new_rgba(size.width.max(1.0) as usize, size.height.max(1.0) as usize);
         canvas.set_fill_gray(0.105);
         canvas.fill_rect(full);
+        // TEMP-PERF
+        let mut t_shadow = std::time::Duration::ZERO;
+        let mut t_checker = std::time::Duration::ZERO;
+        let mut t_layers = std::time::Duration::ZERO;
         if rect.intersects(full) {
             // The document's shadow: a black rectangle three points below the document, blurred.
             // The blur's reach is about three sigma; past that it is nothing, so only that much of
-            // the frame is cleared and blurred.
+            // the frame is carried.
             let sigma = 7.0 * device;
-            let area = rect.inset_by(-3.0 * sigma, -3.0 * sigma).intersection(full);
+            let t0 = std::time::Instant::now(); // TEMP-PERF
+            let blur_box = rect.inset_by(-3.0 * sigma, -3.0 * sigma);
+            // The sprite is rasterized on the destination's own pixel grid and drawn back onto it, so
+            // the blit is one source pixel per destination pixel rather than a second resampling. That
+            // is what Core Image does — the blur and the composite are in the same space — and it only
+            // changes the shadow by the sub-pixel offset the box is rounded out to.
+            let area = if blur_box.width() * blur_box.height() <= SHADOW_SPRITE_PIXELS {
+                blur_box.integral()
+            } else {
+                blur_box.intersection(full).integral()
+            };
             if !area.is_null() && !area.is_empty() {
-                let mut shadow = Canvas::new_rgba(area.width() as usize, area.height() as usize);
-                shadow.translate(-area.min_x(), -area.min_y());
-                shadow.set_fill_color(PaletteColor::BLACK);
-                shadow.set_alpha(0.35);
-                shadow.fill_rect(rect.offset_by(0.0, 3.0 * device));
-                let blurred = gaussian_blur(&PixelImage::Rgba(Arc::new(shadow.into_rgba())), sigma, true);
-                if let Some(blurred) = blurred.as_rgba() {
-                    canvas.draw_image(blurred, area);
-                }
+                let drawn = rect.offset_by(0.0, 3.0 * device);
+                SHADOW_SPRITES_CACHE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    let key = ShadowKey {
+                        width: area.width().to_bits(),
+                        height: area.height().to_bits(),
+                        sigma: sigma.to_bits(),
+                        device: device.to_bits(),
+                        // The sprite's own grid is whole pixels, so it is the shadow box's sub-pixel
+                        // offset that decides what its bytes are.
+                        phase_x: drawn.min_x().fract().to_bits(),
+                        phase_y: drawn.min_y().fract().to_bits(),
+                    };
+                    if let Some(sprite) = cache.iter().find(|sprite| sprite.key == key) {
+                        canvas.draw_image(&sprite.image, area);
+                        return;
+                    }
+                    let t_b = std::time::Instant::now(); // TEMP-PERF
+                    let mut shadow = Canvas::new_rgba(area.width() as usize, area.height() as usize);
+                    shadow.translate(-area.min_x(), -area.min_y());
+                    shadow.set_fill_color(PaletteColor::BLACK);
+                    shadow.set_alpha(0.35);
+                    shadow.fill_rect(drawn);
+                    let t_f = t_b.elapsed(); // TEMP-PERF
+                    let blurred =
+                        gaussian_blur(&PixelImage::Rgba(Arc::new(shadow.into_rgba())), sigma, true);
+                    let t_bl = t_b.elapsed() - t_f; // TEMP-PERF
+                    perf(&format!("shadow build fill={t_f:?} blur={t_bl:?}")); // TEMP-PERF
+                    let Some(image) = blurred.as_rgba() else { return };
+                    cache.insert(
+                        0,
+                        ShadowSprite {
+                            key,
+                            image: image.clone(),
+                        },
+                    );
+                    cache.truncate(SHADOW_SPRITES);
+                    let t_d = std::time::Instant::now(); // TEMP-PERF
+                    canvas.draw_image(&cache[0].image, area); // TEMP-PERF
+                    perf(&format!("shadow draw={:?}", t_d.elapsed())); // TEMP-PERF
+                });
             }
+            t_shadow += t0.elapsed(); // TEMP-PERF
+            let t0 = std::time::Instant::now(); // TEMP-PERF
             // Then the document's checkerboard: 10-point squares from its top-left corner.
             let tile = 10.0 * device;
             let visible = rect.intersection(full);
             canvas.save();
             canvas.clip_rect(visible);
             canvas.set_fill_gray(0.30);
-            canvas.fill_rect(visible);
-            canvas.set_fill_gray(0.35);
-            let first_column = ((visible.min_x() - rect.min_x()) / tile).floor() as i64;
-            let last_column = ((visible.max_x() - rect.min_x()) / tile).ceil() as i64;
-            let first_row = ((visible.min_y() - rect.min_y()) / tile).floor() as i64;
-            let last_row = ((visible.max_y() - rect.min_y()) / tile).ceil() as i64;
-            for row in first_row..last_row {
-                for column in first_column..last_column {
-                    if (row + column) % 2 != 0 {
-                        continue;
-                    }
-                    canvas.fill_rect(Rect::new(
-                        rect.min_x() + column as f64 * tile,
-                        rect.min_y() + row as f64 * tile,
-                        tile,
-                        tile,
-                    ));
-                }
-            }
+            canvas.set_fill_gray(0.30);
+            canvas.fill_checkerboard(
+                visible,
+                Point::new(rect.min_x(), rect.min_y()),
+                tile,
+                [89, 89, 89, 255],
+                [77, 77, 77, 255],
+            );
             canvas.restore();
+            t_checker += t0.elapsed(); // TEMP-PERF
+            let t0 = std::time::Instant::now(); // TEMP-PERF
             canvas.save();
             canvas.clip_rect(visible);
             if viewport.zoom() >= CRISP_ZOOM {
@@ -353,6 +448,15 @@ impl Composite {
                 Self::draw_with(document, per_document_pixel, &center, &mut canvas, state);
             }
             canvas.restore();
+            t_layers += t0.elapsed(); // TEMP-PERF
+            perf(&format!(
+                "draw_view shadow={:?} checker={:?} layers={:?} total_px={}x{}",
+                t_shadow,
+                t_checker,
+                t_layers,
+                canvas.width(),
+                canvas.height()
+            ));
             // The document's edge: a one-pixel line centered on it.
             canvas.save();
             canvas.set_fill_color(PaletteColor::WHITE);
