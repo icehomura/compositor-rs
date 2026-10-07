@@ -100,7 +100,10 @@ impl PaletteColor {
 }
 
 pub fn to_byte(component: CGFloat) -> u8 {
-    (component.clamp(0.0, 1.0) * 255.0).round() as u8
+    // Rounding a non-negative value is the same as adding a half and truncating. The sum is exact —
+    // its fractions are multiples of 2⁻⁴⁵, well inside a double — so this agrees with `round` bit for
+    // bit, and `as u8` truncates and saturates where `round` would give 256 for a value of 1.
+    (component.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
 pub fn from_byte(byte: u8) -> CGFloat {
@@ -169,6 +172,28 @@ impl Hsv {
 
 #[cfg(test)]
 mod tests {
+    /// `to_byte` claims to agree with `round`, and the blends only ever feed it `a + b·(1 − s)` of
+    /// three byte-derived values — a finite set that can be walked in full.
+    #[test]
+    fn to_byte_agrees_with_rounding_at_every_blend_input() {
+        let unit = |byte: u8| byte as f64 / 255.0;
+        for source in 0..=255u8 {
+            let source = unit(source);
+            for backdrop in 0..=255u8 {
+                let backdrop = unit(backdrop);
+                for sa in [0.0, 0.25, unit(89), unit(128), 1.0] {
+                    let value = source + backdrop * (1.0 - sa);
+                    let clamped = value.clamp(0.0, 1.0);
+                    assert_eq!(
+                        to_byte(value),
+                        (clamped * 255.0).round() as u8,
+                        "value {value} from source {source} backdrop {backdrop} sa {sa}"
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
