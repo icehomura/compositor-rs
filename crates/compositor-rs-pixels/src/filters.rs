@@ -1204,3 +1204,19 @@ mod tests {
         assert_eq!(clamped, [0.0, 0.0, 0.0, 255.0]);
     }
 }
+
+#[cfg(test)]
+mod temp_bench {
+    use super::*;
+    #[test]
+    fn temp_bench_blur() {
+        for (w, h, sigma) in [(733usize, 565usize, 10.5f64), (733, 565, 3.0), (733, 565, 1.0), (1466, 1130, 10.5)] {
+            let image = Rgba8Image::new(w, h);
+            let t = std::time::Instant::now();
+            let out = gaussian_blur_rgba(&image, sigma, true);
+            let d = t.elapsed();
+            println!("blur {w}x{h} sigma={sigma} -> {d:?}  ({:.2} ns/px)", d.as_nanos() as f64 / (w * h) as f64);
+            assert_eq!(out.width(), w);
+        }
+    }
+}
