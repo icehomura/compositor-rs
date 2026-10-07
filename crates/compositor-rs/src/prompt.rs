@@ -254,6 +254,32 @@ pub(crate) async fn save_panel(cx: &mut AsyncWindowContext, suggested_name: &str
     }
 }
 
+/// The image panel: `UTType.importableImages` with `allowsMultipleSelection` — the `NSOpenPanel`
+/// behind `ContentView.fileImporter(isPresented: $session.showsImporter)`.
+///
+/// `Err` carries the panel's message, which the Swift hands to `session.importError` instead of
+/// showing it directly (a cancelled panel is not an error).
+pub(crate) async fn import_panel(cx: &mut AsyncWindowContext) -> Result<Vec<PathBuf>, String> {
+    let options = PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: true,
+        prompt: Some("Import".into()),
+    };
+    let receiver = cx
+        .update(|_window, cx| cx.prompt_for_paths(options))
+        .map_err(|error| error.to_string())?;
+    match receiver.await {
+        Ok(Ok(paths)) => Ok(paths.unwrap_or_default()),
+        Ok(Err(error)) => {
+            log::error!("the import panel failed: {error}");
+            Err(error.to_string())
+        }
+        // The window went away: the import is abandoned, not failed.
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
 /// The unsaved-changes alert's three buttons, as `confirmReplacement` shows them.
 async fn replacement_alert(cx: &mut AsyncWindowContext, title: String, message: String) -> Option<Replacement> {
     let (sender, receiver) = oneshot::channel();

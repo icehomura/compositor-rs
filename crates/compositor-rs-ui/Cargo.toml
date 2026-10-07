@@ -14,6 +14,7 @@ compositor-rs-render.workspace = true
 compositor-rs-session.workspace = true
 compositor-rs-io.workspace = true
 gpui-kit = "0.7"
+image.workspace = true
 rustc-hash.workspace = true
 parking_lot.workspace = true
 log.workspace = true
