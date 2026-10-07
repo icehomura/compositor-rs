@@ -522,13 +522,8 @@ impl Render for ContentView {
         let is_drop_targeted = self.is_drop_targeted;
         let panel_width = self.layers_panel_width;
 
-        // The window's title follows the project, as the toolbar's did.
-        let title = if project_name == "Untitled" {
-            "Compositor".to_string()
-        } else {
-            format!("Compositor — {project_name}")
-        };
-        window.set_window_title(&title);
+        // The window's title follows the project: `.navigationTitle(projectURL?… ?? "Untitled")`.
+        window.set_window_title(&project_name);
 
         let header: Option<AnyElement> = if !Self::has_header(tool) {
             None
