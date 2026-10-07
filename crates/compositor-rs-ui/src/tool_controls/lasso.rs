@@ -9,7 +9,8 @@ use compositor_rs_session::selection::SelectionAmountOperation;
 use compositor_rs_session::EditorSession;
 
 use crate::tool_controls::{
-    segmented_picker, unit_suffix, EditEnd, FieldSpec, Fields, TextFields, CONTROL_SPACING,
+    menu_picker, segmented_picker, unit_suffix, EditEnd, FieldSpec, Fields, TextFields,
+    CONTROL_SPACING,
 };
 use crate::tool_header::{tool_header_bar, tool_header_spacer, tool_header_title};
 use crate::widgets::gradient_slider::CameraRawSlider;
@@ -295,7 +296,9 @@ impl LassoControls {
         };
         let sample_size = {
             let session = self.session.clone();
-            segmented_picker(
+            // `Picker("Sample Size", …)` has no `.pickerStyle(.segmented)`, so it stays the menu the
+            // macOS default gives; only `Picker("Sample", …)` is segmented.
+            menu_picker(
                 "wand-sample-size",
                 WandSampleSize::ALL.map(|size| (size, size.title())),
                 state.wand_sample_size,

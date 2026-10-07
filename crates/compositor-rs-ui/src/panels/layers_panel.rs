@@ -566,7 +566,12 @@ impl LayersPanel {
             })
             .cursor(CursorStyle::PointingHand)
             .tooltip({
-                let help = if is_text { "Editable text layer" } else { "Select layer; Cmd-click to select its pixels (Cmd-Shift adds, Cmd-Option subtracts)" };
+                // `configure` overwrites the cell's initial string, so this is the tooltip a hover shows.
+                let help = if is_text {
+                    "Editable text layer"
+                } else {
+                    "Select image pixels"
+                };
                 move |window, cx| Tooltip::new(help).build(window, cx)
             })
             .aria_label(format!("Select {}: {}", if is_text { "text" } else { "image" }, row.name))
@@ -748,7 +753,12 @@ impl LayersPanel {
             ))
             // The chain is drawn while the two are linked; an unlinked pair keeps the clickable gap.
             .when(linked, |this| {
-                this.child(Icon::new(IconName::Link).size(px(10.0)))
+                this.child(
+                    // `linkImage`: the chain runs corner to corner, turned 45° it stands upright.
+                    Icon::new(IconName::Link)
+                        .size(px(10.0))
+                        .rotate(Radians(std::f32::consts::FRAC_PI_4)),
+                )
             })
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 cx.stop_propagation();
@@ -1239,6 +1249,13 @@ impl LayersPanel {
                     .pl(px(38.0 + indent))
                     .pr(px(8.0))
                     .when(selected, |this| this.bg(hsla(0.6, 1.0, 0.6, 0.30)))
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(format!(
+                            "Click to select; double-click to edit; Option-drag to copy {}",
+                            kind.raw_value().to_lowercase()
+                        ))
+                        .build(window, cx)
+                    })
                     .aria_label(format!("{} effect", kind.raw_value()))
                     .child(
                         div()

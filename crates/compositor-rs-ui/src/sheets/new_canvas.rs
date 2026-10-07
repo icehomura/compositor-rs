@@ -15,6 +15,7 @@ use crate::actions::OpenProject;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
@@ -23,8 +24,11 @@ use gpui_kit::component::{h_flex, v_flex, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// `.frame(maxWidth: 500)`.
+/// `.frame(maxWidth: 500)`. The sheet is hosted over the canvas, so SwiftUI's flexible frame
+/// resolves to the maximum there; a fixed width is the same result.
 const MAX_WIDTH: f32 = 500.0;
+/// `.font(.callout)`: 12 points, as macOS sizes it (the port's other `.callout`s agree).
+const CALLOUT_SIZE: f32 = 12.0;
 /// `.padding(28)`.
 const PADDING: f32 = 28.0;
 
@@ -154,8 +158,8 @@ impl NewCanvasSheet {
         if self.width_input.is_some() {
             return;
         }
-        let width = cx.new(|cx| InputState::new(window, cx));
-        let height = cx.new(|cx| InputState::new(window, cx));
+        let width = cx.new(|cx| InputState::new(window, cx).placeholder("Width"));
+        let height = cx.new(|cx| InputState::new(window, cx).placeholder("Height"));
         self._subscriptions.push(cx.subscribe_in(
             &width,
             window,
@@ -223,14 +227,14 @@ impl NewCanvasSheet {
             .gap(px(8.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(CALLOUT_SIZE))
                     .font_weight(FontWeight::MEDIUM)
                     .child(title),
             )
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(8.0))
                     .p(px(12.0))
                     .rounded(px(7.0))
                     .bg(hsla(0.0, 0.0, 1.0, 0.10))
@@ -240,7 +244,7 @@ impl NewCanvasSheet {
     }
 
     /// The three-dot preset menu (`Menu { Picker(…) }`): Custom, then the groups divided.
-    fn preset_menu(&self, preset: Option<&'static CanvasPreset>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn preset_menu(&self, preset: Option<&'static CanvasPreset>, disabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let width = self.width_input.clone().expect("the fields are built on the first render");
         let height = self.height_input.clone().expect("the fields are built on the first render");
         let sheet = cx.entity().downgrade();
@@ -259,10 +263,30 @@ impl NewCanvasSheet {
             })
             .trigger(
                 Button::new("new-canvas-presets-trigger")
-                    .label("•••")
                     .ghost()
+                    .disabled(disabled)
                     .tooltip("Preset sizes for screens and common formats")
-                    .accessibility_label("Preset sizes"),
+                    .accessibility_label("Preset sizes")
+                    // Three dots drawn exactly (a rotated symbol keeps its sideways width), flush
+                    // with the fields' right edge; the frame keeps it easy to click.
+                    .child(
+                        v_flex()
+                            .items_end()
+                            .justify_center()
+                            .gap(px(2.5))
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .children((0..3).map(|_| {
+                                div()
+                                    .size(px(2.5))
+                                    .rounded_full()
+                                    .bg(cx.theme().foreground)
+                            })),
+                    )
+                    // `.fixedSize()`: no button padding either, so the dots stay flush with the
+                    // fields' right edge.
+                    .px(px(0.0))
+                    .h(px(28.0)),
             )
             .content(move |_, _, _| {
                 let mut menu = v_flex().w(px(240.0)).gap(px(2.0)).child(preset_row(
@@ -289,6 +313,37 @@ impl NewCanvasSheet {
                 menu
             })
     }
+}
+
+/// `Image(systemName: "multiply").foregroundStyle(.tertiary)`: a small stroked × between the two
+/// fields. The text glyph (U+2715) is a much larger, heavier cross than the symbol, so it is drawn.
+fn multiply_mark() -> impl IntoElement {
+    /// `.tertiary`, fainter than the `.secondary` text either side of it.
+    const TERTIARY: Hsla = hsla(0.0, 0.0, 1.0, 0.3);
+
+    canvas(
+        move |_, _, _| (),
+        move |bounds, _, window, _| {
+            // A 9.5×9.5 cross, centred in the symbol's 13-point line box.
+            let x = bounds.origin.x;
+            let y = bounds.origin.y;
+            let (left, right) = (x + px(0.25), x + px(9.75));
+            let (top, bottom) = (y + px(1.75), y + px(11.25));
+            for (from, to) in [
+                (point(left, top), point(right, bottom)),
+                (point(right, top), point(left, bottom)),
+            ] {
+                let mut path = PathBuilder::stroke(px(1.0));
+                path.move_to(from);
+                path.line_to(to);
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, TERTIARY);
+                }
+            }
+        },
+    )
+    .w(px(10.0))
+    .h(px(13.0))
 }
 
 /// One row of the preset menu: choosing a preset fills both fields in; Custom leaves them alone.
@@ -354,19 +409,19 @@ impl Render for NewCanvasSheet {
                             .child("New canvas"),
                     )
                     .child(div().flex_1())
-                    .child(self.preset_menu(preset, cx)),
+                    .child(self.preset_menu(preset, disabled, cx)),
             )
             .child(
                 h_flex()
                     .items_start()
                     .gap(px(16.0))
                     .child(self.dimension("Width", true, disabled))
-                    .child(div().pt(px(20.0)).opacity(0.5).child("✕"))
+                    .child(div().pt(px(20.0)).child(multiply_mark()))
                     .child(self.dimension("Height", false, disabled)),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(CALLOUT_SIZE))
                     .text_color(if valid { hsla(0.0, 0.0, 1.0, 0.6) } else { ORANGE })
                     .child(if valid {
                         "Transparent canvas · sRGB".to_string()

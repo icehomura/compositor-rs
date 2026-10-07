@@ -49,28 +49,44 @@ impl ToolRail {
             .filter(|tool| *tool != NavigationTool::Idle)
     }
 
-    /// The SF Symbol the rail draws for a tool, with the Marquee's icon following its shape.
-    pub fn symbol(tool: NavigationTool, marquee_ellipse: bool) -> IconName {
+    /// The Lucide mark that stands in for an SF Symbol name.
+    ///
+    /// The names are the ones `EditorSession::symbol(for:)` and `ContentView.toolRail` hand out, so
+    /// the mode-following stays in the session where the Swift keeps it.
+    pub fn sf_symbol(symbol: &str) -> IconName {
+        match symbol {
+            "textformat" => IconName::Type,
+            "eyedropper" => IconName::Pipette,
+            "rectangle.dashed" => IconName::SquareDashed,
+            "circle.dashed" => IconName::CircleDashed,
+            "lasso" => IconName::Lasso,
+            "wand.and.stars" => IconName::WandSparkles,
+            "paintbrush.pointed" => IconName::Paintbrush,
+            "bandage" => IconName::Bandage,
+            "seal" => IconName::Stamp,
+            "drop" => IconName::Droplet,
+            "square.bottomhalf.filled" => IconName::Contrast,
+            "square.on.circle" => IconName::Shapes,
+            "crop" => IconName::Crop,
+            "arrow.up.left.and.arrow.down.right" => IconName::MoveDiagonal,
+            "hand.draw" => IconName::Hand,
+            "eraser" => IconName::Eraser,
+            // `Symbol`'s final else, which covers Zoom and the idle tool.
+            _ => IconName::Search,
+        }
+    }
+
+    /// The rail's icon for a tool: `session.symbol(for:)` — the Brush shows the eraser in Erase mode
+    /// — except the Marquee, whose icon follows its shape (a dashed circle in Ellipse mode).
+    pub fn symbol(
+        session: &EditorSession,
+        tool: NavigationTool,
+        marquee_ellipse: bool,
+    ) -> IconName {
         if tool == NavigationTool::Marquee && marquee_ellipse {
             return IconName::CircleDashed;
         }
-        match tool {
-            NavigationTool::Type => IconName::Type,
-            NavigationTool::Eyedropper => IconName::Pipette,
-            NavigationTool::Marquee => IconName::SquareDashed,
-            NavigationTool::Lasso => IconName::Lasso,
-            NavigationTool::Wand => IconName::WandSparkles,
-            NavigationTool::Brush => IconName::Paintbrush,
-            NavigationTool::SpotHealing => IconName::Bandage,
-            NavigationTool::CloneStamp => IconName::Stamp,
-            NavigationTool::Blur => IconName::Droplet,
-            NavigationTool::Gradient => IconName::Contrast,
-            NavigationTool::Shape => IconName::Shapes,
-            NavigationTool::Crop => IconName::Crop,
-            NavigationTool::Move => IconName::MoveDiagonal,
-            NavigationTool::Hand => IconName::Hand,
-            NavigationTool::Zoom | NavigationTool::Idle => IconName::Search,
-        }
+        Self::sf_symbol(&session.symbol(tool))
     }
 }
 
@@ -82,8 +98,15 @@ impl Render for ToolRail {
         let wand_object = session.wand_mode == WandMode::Object;
         let marquee_ellipse = session.marquee_kind == LassoKind::Ellipse;
 
+        // Read the icons up front: `EditorSession::symbol` borrows the session, and the buttons below
+        // need `cx` mutably for their listeners.
+        let icons = Self::tools()
+            .map(|tool| Self::symbol(session, tool, marquee_ellipse))
+            .collect::<Vec<_>>();
+
         let buttons = Self::tools()
-            .map(|tool| {
+            .zip(icons)
+            .map(|(tool, icon)| {
                 let label = tool.label();
                 // The icons that aren't an SF Symbol: the Gradient, Clone Stamp, polygonal Lasso
                 // and Object Selection marks the Swift draws itself.
@@ -112,8 +135,9 @@ impl Render for ToolRail {
                 // `Button::icon` takes an icon, not an element: the SF Symbols go through its
                 // icon slot, the marks Swift draws itself ride as the button's content.
                 match drawn_icon {
-                    Some(icon) => button.child(icon),
-                    None => button.icon(Icon::new(Self::symbol(tool, marquee_ellipse))),
+                    Some(drawn) => button.child(drawn),
+                    // `.font(.system(size: 17))`: the SF Symbols beside the drawn marks are 17 pt.
+                    None => button.icon(Icon::new(icon).size(px(17.0))),
                 }
             })
             .collect::<Vec<_>>();
@@ -129,5 +153,60 @@ impl Render for ToolRail {
                 .children(buttons)
                 .child(div().pt(px(8.0)).child(self.palette.clone())),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `use super::*` would also bring in the toolkit's `test` attribute macro (gpui-kit's test-support
+    // exports one), which shadows the built-in `#[test]`; these tests are the built-in's.
+    use ::core::prelude::v1::test;
+    use super::*;
+    use compositor_rs_pixels::warp::BrushToolMode;
+
+    #[test]
+    fn the_brush_shows_the_eraser_in_erase_mode() {
+        let mut session = EditorSession::default();
+        assert_eq!(
+            ToolRail::symbol(&session, NavigationTool::Brush, false),
+            IconName::Paintbrush
+        );
+        session.brush_mode = BrushToolMode::Erase;
+        assert_eq!(
+            ToolRail::symbol(&session, NavigationTool::Brush, false),
+            IconName::Eraser
+        );
+    }
+
+    #[test]
+    fn the_marquee_follows_its_shape() {
+        let session = EditorSession::default();
+        assert_eq!(
+            ToolRail::symbol(&session, NavigationTool::Marquee, false),
+            IconName::SquareDashed
+        );
+        assert_eq!(
+            ToolRail::symbol(&session, NavigationTool::Marquee, true),
+            IconName::CircleDashed
+        );
+    }
+
+    /// Every symbol `EditorSession::symbol(for:)` can return has a mark of its own, so no tool falls
+    /// through to the final else (the magnifying glass, which only the Zoom tool earns).
+    #[test]
+    fn every_tool_symbol_has_a_mark() {
+        let session = EditorSession::default();
+        for tool in NavigationTool::ALL {
+            let name = session.symbol(tool);
+            if tool == NavigationTool::Zoom || tool == NavigationTool::Idle {
+                assert_eq!(name, "magnifyingglass");
+                continue;
+            }
+            assert_ne!(
+                ToolRail::sf_symbol(&name),
+                IconName::Search,
+                "{name} fell through to the final else"
+            );
+        }
     }
 }

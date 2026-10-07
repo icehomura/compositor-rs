@@ -291,7 +291,8 @@ impl Render for BrushControls {
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                // A direct child of Swift's `HStack(spacing: 12)`, not its own 6-point row.
+                .gap(px(CONTROL_SPACING))
                 .child(div().child("Radius").scrubbable("brush-blur-radius-label", scrub))
                 .child(slider)
                 .child(
@@ -350,7 +351,8 @@ impl Render for BrushControls {
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                // A direct child of Swift's `HStack(spacing: 12)`, not its own 6-point row.
+                .gap(px(CONTROL_SPACING))
                 .child(div().child("Smoothing").scrubbable("brush-smoothing-label", scrub))
                 .child(slider)
                 .child(

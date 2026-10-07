@@ -76,6 +76,12 @@ pub struct CompositeState<'a> {
     pub transform: Option<&'a dyn Fn(Id) -> Option<LayerTransform>>,
     /// `session.displayedMaskPlacement(for:)`.
     pub mask_placement: Option<&'a dyn Fn(Id) -> Option<LayerTransform>>,
+    /// `CanvasView.renderBounds`: the document pixels the backdrop covers, in document pixels.
+    ///
+    /// `nil` outside the crop tool, where the Swift's fallback is the document's own rect; while
+    /// cropping it is `document ∪ cropRect`, so the shadow, checkerboard and edge follow a crop
+    /// frame dragged past the document.
+    pub render_bounds: Option<Rect>,
 }
 
 impl<'a> CompositeState<'a> {
@@ -180,31 +186,37 @@ impl Composite {
 
     /// `drawPixelGrid(in:document:context:)`: one-screen-pixel lines on document pixel boundaries,
     /// over the image only.
+    ///
+    /// The Swift draws into a view-points context whose CTM carries the backing scale, so its
+    /// `1 / backingScale` hairline comes to one device pixel. `canvas` here is already in device
+    /// pixels (`draw_view`'s convention), so the view geometry is scaled by `device` and the
+    /// hairline is one pixel outright.
     pub fn draw_pixel_grid(
         document: &CanvasDocument,
         viewport: &CanvasViewport,
+        device: f64,
         view: Rect,
         canvas: &mut Canvas,
     ) {
         let size = document.size();
-        let origin = viewport.view_point(Point::ZERO, size);
+        let per_pixel = viewport.points_per_pixel() * device;
+        let origin = viewport.document_rect(size).origin;
         let document_rect = Rect::new(
-            origin.x,
-            origin.y,
-            size.width * viewport.points_per_pixel(),
-            size.height * viewport.points_per_pixel(),
+            origin.x * device,
+            origin.y * device,
+            size.width * per_pixel,
+            size.height * per_pixel,
         );
         let area = view.intersection(document_rect);
         if area.is_null() || area.is_empty() {
             return;
         }
-        let first = viewport.document_point(area.origin, size);
-        let last = viewport.document_point(Point::new(area.max_x(), area.max_y()), size);
-        let hairline = 1.0 / viewport.backing_scale;
+        let hairline = 1.0;
         let mut path = Path::empty();
-        let mut column = first.x.ceil() as i64;
-        while column <= last.x.floor() as i64 {
-            let x = viewport.view_point(Point::new(column as f64, 0.0), size).x;
+        let mut column = ((area.min_x() - document_rect.min_x()) / per_pixel).ceil() as i64;
+        let last_column = ((area.max_x() - document_rect.min_x()) / per_pixel).floor() as i64;
+        while column <= last_column {
+            let x = document_rect.min_x() + column as f64 * per_pixel;
             path.add_rect(Rect::new(
                 x - hairline / 2.0,
                 area.min_y(),
@@ -213,9 +225,10 @@ impl Composite {
             ));
             column += 1;
         }
-        let mut row = first.y.ceil() as i64;
-        while row <= last.y.floor() as i64 {
-            let y = viewport.view_point(Point::new(0.0, row as f64), size).y;
+        let mut row = ((area.min_y() - document_rect.min_y()) / per_pixel).ceil() as i64;
+        let last_row = ((area.max_y() - document_rect.min_y()) / per_pixel).floor() as i64;
+        while row <= last_row {
+            let y = document_rect.min_y() + row as f64 * per_pixel;
             path.add_rect(Rect::new(
                 area.min_x(),
                 y - hairline / 2.0,
@@ -249,12 +262,27 @@ impl Composite {
         let origin = viewport.document_rect(document_size).origin;
         let per_pixel = viewport.points_per_pixel() * device;
         let full = Rect::new(0.0, 0.0, size.width, size.height);
-        let rect = Rect::new(
+        // Where the document itself lands: what the layers and the crisp region are mapped with.
+        let document_rect = Rect::new(
             origin.x * device,
             origin.y * device,
             document_size.width * per_pixel,
             document_size.height * per_pixel,
         );
+        // `renderBounds ?? CGRect(origin: .zero, size: document.size)`: the backdrop, the shadow,
+        // the clip and the edge all follow this rect, which the crop tool grows to hold the frame.
+        let rect = match state.render_bounds {
+            Some(pixels) => {
+                let view_origin = viewport.view_point(pixels.origin, document_size);
+                Rect::new(
+                    view_origin.x * device,
+                    view_origin.y * device,
+                    pixels.width() * per_pixel,
+                    pixels.height() * per_pixel,
+                )
+            }
+            None => document_rect,
+        };
         let mut canvas = Canvas::new_rgba(size.width.max(1.0) as usize, size.height.max(1.0) as usize);
         canvas.set_fill_gray(0.105);
         canvas.fill_rect(full);
@@ -306,10 +334,10 @@ impl Composite {
             if viewport.zoom() >= CRISP_ZOOM {
                 // From 200% the document's own pixels are composited one to one and enlarged as
                 // crisp squares.
-                let region = visible_document_region(rect, document_size, per_pixel, visible);
+                let region = visible_document_region(document_rect, document_size, per_pixel, visible);
                 let target = Rect::new(
-                    rect.min_x() + region.min_x() * per_pixel,
-                    rect.min_y() + region.min_y() * per_pixel,
+                    document_rect.min_x() + region.min_x() * per_pixel,
+                    document_rect.min_y() + region.min_y() * per_pixel,
                     region.width() * per_pixel,
                     region.height() * per_pixel,
                 );
@@ -318,8 +346,8 @@ impl Composite {
                 let per_document_pixel = per_pixel;
                 let center = |point: Point| {
                     Point::new(
-                        rect.min_x() + point.x * per_document_pixel,
-                        rect.min_y() + point.y * per_document_pixel,
+                        document_rect.min_x() + point.x * per_document_pixel,
+                        document_rect.min_y() + point.y * per_document_pixel,
                     )
                 };
                 Self::draw_with(document, per_document_pixel, &center, &mut canvas, state);
@@ -1552,5 +1580,66 @@ mod tests {
         let chained = canvas.into_rgba();
         let alpha: Vec<u8> = (0..4).map(|index| chained.get(index % 2, index / 2)[3]).collect();
         assert_eq!(alpha, vec![0, 0, 128, 255], "the chain's coverage");
+    }
+
+    /// The pixel grid draws into a device-pixel raster, so its geometry has to be scaled by the
+    /// backing scale: on a 2x display a line must still land on a document pixel boundary, one
+    /// device pixel wide, instead of halving everything into the raster's top-left corner.
+    #[test]
+    fn the_pixel_grid_lands_on_document_boundaries_in_device_pixels() {
+        let document = CanvasDocument::new(4, 4);
+        let size = document.size();
+        let mut viewport = CanvasViewport::default();
+        viewport.view_size = Size::new(100.0, 100.0);
+        viewport.backing_scale = 2.0;
+        viewport.set_zoom(8.0, viewport.center(), size);
+
+        let device = viewport.backing_scale;
+        let pixels = Size::new(100.0 * device, 100.0 * device);
+        let mut canvas = Canvas::new_rgba(pixels.width as usize, pixels.height as usize);
+        Composite::draw_pixel_grid(
+            &document,
+            &viewport,
+            device,
+            Rect::new(0.0, 0.0, pixels.width, pixels.height),
+            &mut canvas,
+        );
+        let raster = canvas.into_rgba();
+
+        // 4 document pixels at 8 device pixels each, centred in the 200-pixel raster.
+        let first = 100.0 * device / 2.0 - 4.0 * 8.0 / 2.0;
+        let step = viewport.points_per_pixel() * device;
+        // Read a line that runs between the perpendicular grid lines, so every covered pixel is
+        // one of the lines being measured.
+        let between = (first + step / 2.0) as usize;
+        let runs = |along_x: bool| {
+            let last = pixels.width as usize;
+            let mut runs: Vec<f64> = Vec::new();
+            let mut previous: Option<usize> = None;
+            for index in 0..last {
+                let (x, y) = if along_x {
+                    (index, between)
+                } else {
+                    (between, index)
+                };
+                if raster.get(x, y)[3] > 0 {
+                    if previous != Some(index.wrapping_sub(1)) {
+                        runs.push(index as f64);
+                    }
+                    previous = Some(index);
+                }
+            }
+            runs
+        };
+        for (name, runs) in [("columns", runs(true)), ("rows", runs(false))] {
+            assert_eq!(runs.len(), 5, "{name}: one line per document pixel boundary");
+            for (index, start) in runs.iter().enumerate() {
+                let expected = first + index as f64 * step;
+                assert!(
+                    (start - expected).abs() <= 1.0,
+                    "{name} line {index} at {start}, expected {expected}"
+                );
+            }
+        }
     }
 }

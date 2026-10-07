@@ -85,7 +85,9 @@ impl ColorPaletteControls {
                             .w(px(SWATCH_SIZE))
                             .h(px(SWATCH_SIZE))
                             .rounded(px(6.0))
-                            .border_2()
+                            // `inset(by: 1).strokeBorder(.white, lineWidth: 1.5)`: a 1.5-point band
+                            // starting one point in, which the black ring below leaves visible.
+                            .border(px(2.5))
                             .border_color(hsla(0.0, 0.0, 1.0, 1.0))
                             .bg(Hsla::from(palette_rgba(color)))
                             .child(

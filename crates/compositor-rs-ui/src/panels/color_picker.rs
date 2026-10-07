@@ -1,9 +1,12 @@
 //! Photoshop-style color picker: saturation/brightness field, vertical hue strip, new/current
 //! preview, RGB and hex entry.
 //!
-//! Ported from `UI/ColorPickerSheet.swift`. It lives in a movable floating panel
-//! ([`ColorPickerPanelController`]) so the canvas stays visible and can be clicked to sample a
-//! color; closing the panel with its title-bar button cancels.
+//! Ported from `UI/ColorPickerSheet.swift`. The Swift showed it in a movable `NSPanel` that floated
+//! above the document and above any sheet, so the canvas stayed visible and could be clicked to
+//! sample a color; closing the panel with its title-bar button cancelled. The port's
+//! [`ColorPickerPanelController`] hosts the same sheet in whichever surface is on top: one of the
+//! editor's floating panels while the editor is, and a dialog of the window's own layer while a
+//! dialog is.
 //!
 //! Two platform notes. The Swift `DragGesture` on the two fields is gpui's drag payload, so the
 //! fields' own bounds are recorded while they paint and the pointer's travel is measured inside
@@ -22,9 +25,11 @@ use crate::canvas::overlays::palette_rgba;
 use crate::panels::floating_panel::{FloatingPanelController, FloatingPanelPlacement};
 use crate::widgets::numeric_scrub::{arrow_stepped, NumericScrub, Scrubbable as _};
 
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::Sizable as _;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
@@ -33,6 +38,10 @@ use gpui_kit::*;
 pub const FIELD_SIZE: f32 = 256.0;
 /// The column the OK/Cancel buttons and the fields live in (`.frame(width: 180)`).
 const COLUMN_WIDTH: f32 = 180.0;
+/// The sheet's `padding(20)`.
+const PANEL_PADDING: f32 = 20.0;
+/// The sheet's `HStack(spacing: 14)`.
+const COLUMN_GAP: f32 = 14.0;
 /// The hue strip's own width (`stripWidth`).
 const STRIP_WIDTH: f32 = 20.0;
 /// The strip's horizontal padding, 7 points on each side.
@@ -45,6 +54,15 @@ const HEX_WIDTH: f32 = 84.0;
 const CHANNEL_WIDTH: f32 = 52.0;
 /// `stride(from: 360.0, through: 0, by: -60)`: the hue strip's stops, top to bottom.
 const HUE_STOPS: [f64; 7] = [360.0, 300.0, 240.0, 180.0, 120.0, 60.0, 0.0];
+
+/// The sheet's own width: padding, field, gap, strip, gap, column, padding. The hosts size
+/// themselves to it, as the AppKit panel took the sheet's `fittingSize`.
+const PICKER_WIDTH: f32 = PANEL_PADDING * 2.0 + FIELD_SIZE + COLUMN_GAP + STRIP_WIDTH + STRIP_PADDING * 2.0 + COLUMN_GAP + COLUMN_WIDTH;
+/// What the dialog host adds above the sheet: its own `pt(8)`, the title's line, and the card's
+/// `gap(8)`. Only used to centre the card.
+const DIALOG_TITLE_HEIGHT: f32 = 34.0;
+/// The sheet's own height: its padding around the field.
+const PICKER_HEIGHT: f32 = PANEL_PADDING * 2.0 + FIELD_SIZE;
 
 /// The empty view a field's drag carries: dragging sets the color, so no ghost is shown.
 struct PickerDrag;
@@ -185,8 +203,22 @@ impl ColorPickerSheet {
             .top(px((1.0 - hsb.brightness) as f32 * FIELD_SIZE - 6.0))
             .size(px(12.0))
             .rounded_full()
-            .border_2()
-            .border_color(hsla(0.0, 0.0, 1.0, 1.0));
+            .border(px(1.5))
+            .border_color(hsla(0.0, 0.0, 1.0, 1.0))
+            // `.background(Circle().strokeBorder(.black, lineWidth: 0.75).padding(-0.75))`: a
+            // black hairline just outside the white ring, so the marker also reads on white. The
+            // background view is layout-neutral in SwiftUI, so the 12×12 frame stays — the ring
+            // overflows by 0.75 on each side.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-0.75))
+                    .left(px(-0.75))
+                    .size(px(13.5))
+                    .rounded_full()
+                    .border(px(0.75))
+                    .border_color(hsla(0.0, 0.0, 0.0, 1.0)),
+            );
 
         div()
             .id(ElementId::Name("color-picker-sv-field".into()))
@@ -242,6 +274,8 @@ impl ColorPickerSheet {
     /// The hue strip: seven stops top to bottom, with the two arrows beside it.
     fn hue_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hue = self.hsb(cx).hue;
+        // `HueArrow().fill(.primary)`.
+        let primary = cx.theme().foreground;
         let marker_y = (1.0 - hue / 360.0) as f32 * FIELD_SIZE;
         let entity = cx.entity();
         let strip_bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
@@ -292,8 +326,8 @@ impl ColorPickerSheet {
                     .top(px(marker_y - 5.0))
                     .left_0()
                     .gap(px(STRIP_WIDTH))
-                    .child(hue_arrow(false))
-                    .child(hue_arrow(true)),
+                    .child(hue_arrow(false, primary))
+                    .child(hue_arrow(true, primary)),
             )
             .child(
                 canvas(
@@ -525,8 +559,9 @@ fn set_hue(
     });
 }
 
-/// `HueArrow`: a 7×10 triangle, `mirrored` for the right-hand one (`.scaleEffect(x: -1)`).
-fn hue_arrow(mirrored: bool) -> impl IntoElement {
+/// `HueArrow`: a 7×10 triangle filled `.primary`, `mirrored` for the right-hand one
+/// (`.scaleEffect(x: -1)`).
+fn hue_arrow(mirrored: bool, color: Hsla) -> impl IntoElement {
     canvas(
         move |_, _, _| (),
         move |bounds, _, window, _| {
@@ -543,7 +578,7 @@ fn hue_arrow(mirrored: bool) -> impl IntoElement {
             path.line_to(point(left, bounds.origin.y + height));
             path.close();
             if let Ok(path) = path.build() {
-                window.paint_path(path, hsla(0.0, 0.0, 0.0, 1.0));
+                window.paint_path(path, color);
             }
         },
     )
@@ -567,8 +602,8 @@ impl Render for ColorPickerSheet {
 
         h_flex()
             .items_start()
-            .gap(px(14.0))
-            .p(px(20.0))
+            .gap(px(COLUMN_GAP))
+            .p(px(PANEL_PADDING))
             .child(self.saturation_brightness_field(cx))
             .child(self.hue_strip(cx))
             .child(
@@ -627,10 +662,46 @@ impl Render for ColorPickerSheet {
     }
 }
 
-/// Hosts the picker in the shared floating panel: first opened centered on the canvas, afterwards
-/// wherever it was last left. Closing it with the title-bar button cancels.
+/// The editor's canvas row, in window coordinates (`ContentView` centres its panels in the same box).
+/// A palette can only be edited while a document is open, so the tool header is up in both hosts and
+/// the row is the same either way: below the header's divider, above the status bar's.
+fn canvas_row(viewport_height: f32) -> (f32, f32) {
+    let top = f32::from(gpui_kit::component::TITLE_BAR_HEIGHT)
+        + crate::workspace::TAB_STRIP_HEIGHT
+        + crate::tool_header::TOOL_HEADER_HEIGHT
+        + crate::content_view::DIVIDER_HEIGHT;
+    let height = (viewport_height
+        - top
+        - crate::content_view::DIVIDER_HEIGHT
+        - crate::toolbar::status_bar::HEIGHT)
+        .max(0.0);
+    (top, height)
+}
+
+/// The picker's own window, the port of `ColorPickerPanelController`: first opened centered on the
+/// canvas, afterwards wherever it was last left, and closed by its title-bar button.
+///
+/// The Swift put the sheet in one `NSPanel` that floated above the document and above any sheet. The
+/// port has two hosts for that one panel, chosen by what is on top of the editor:
+///
+/// * with the editor on top the picker is one of the editor's floating panels ([`Self::sync`]), which
+///   is the only host that leaves the canvas clickable — sampling from it is the picker's point;
+/// * with a dialog on top — a picker a dialog's own swatch opened, or any picker while a dialog came
+///   up — it is a dialog of the window's own layer ([`Self::sync_dialog`]), because the editor's
+///   panels are drawn below that layer, where the dialog's overlay dims and blocks them.
+///
+/// A dialog can neither be dragged nor keep the canvas clickable, so the panel is the host that
+/// matches the Swift's panel; the dialog host only stands in for it above a modal, where the Swift's
+/// own hint says there is nothing to sample.
 pub struct ColorPickerPanelController {
     panel: FloatingPanelController,
+    /// The title the editor panel shows, `None` while it is hidden.
+    title: Option<String>,
+    /// The target the window-level dialog shows, `None` while it is hidden.
+    dialog: Option<ColorPickerTarget>,
+    /// Whether the picker has already taken its own dialog down: the one thing that tells a pop
+    /// already made from one still to make, so the dialog underneath is never popped by mistake.
+    dialog_taken_down: Rc<Cell<bool>>,
 }
 
 impl Default for ColorPickerPanelController {
@@ -645,25 +716,44 @@ impl ColorPickerPanelController {
     pub fn new() -> Self {
         Self {
             panel: FloatingPanelController::new(Self::IDENTIFIER),
+            title: None,
+            dialog: None,
+            dialog_taken_down: Rc::new(Cell::new(false)),
         }
     }
 
-    /// `show(_:session:)`: the panel's close button cancels, as the Swift's did.
-    pub fn show(&mut self, session: Entity<EditorSession>, window: &mut Window, cx: &mut App) {
+    /// `show(_:session:)` for a color the canvas can be sampled for: shown as one of the editor's
+    /// floating panels while the editor is on top, and put away as soon as the picker closes.
+    pub fn sync(
+        &mut self,
+        session: Entity<EditorSession>,
+        dialog_up: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let title = match session.read(cx).color_picker.as_ref() {
+            Some(picker) if !dialog_up && !matches!(picker.target, ColorPickerTarget::Dialog { .. }) => {
+                Some(picker.target.title())
+            }
+            _ => None,
+        };
+        let Some(title) = title else {
+            self.title = None;
+            self.panel.close(window, cx);
+            return;
+        };
+        // Picking another swatch re-shows the panel where it was left, as the Swift's `onChange` did.
+        if self.panel.is_visible() && self.title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        self.title = Some(title.clone());
+        // The panel's close button cancels, as the Swift's did.
         let closing = session.clone();
         self.panel.set_on_close(move |_, cx| {
             if closing.read(cx).color_picker.is_some() {
                 closing.update(cx, |session, _| session.close_color_picker(false));
             }
         });
-        let Some(title) = session
-            .read(cx)
-            .color_picker
-            .as_ref()
-            .map(|picker| picker.target.title())
-        else {
-            return;
-        };
         let finishing = session.clone();
         let sheet = cx.new(|cx| {
             ColorPickerSheet::new(
@@ -679,22 +769,137 @@ impl ColorPickerPanelController {
             .show(title, sheet, FloatingPanelPlacement::Automatic, window, cx);
     }
 
+    /// Ties the window's dialog layer to the picker: the host to use while the picker has to float
+    /// above a dialog, and taken down again when the picker closes.
+    pub fn sync_dialog(
+        &mut self,
+        session: Option<Entity<EditorSession>>,
+        dialog_up: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let target = session.as_ref().and_then(|session| {
+            session
+                .read(cx)
+                .color_picker
+                .as_ref()
+                .map(|picker| picker.target.clone())
+        });
+        let target = target.filter(|target| {
+            dialog_up || matches!(target, ColorPickerTarget::Dialog { .. })
+        });
+        if target == self.dialog {
+            return;
+        }
+        // The picker's own dialog is taken down by the picker (its OK, its Cancel, its close button
+        // and Escape all pop it as they close it). A picker the session clears from anywhere else is
+        // taken down here instead.
+        let was_open = self.dialog.take().is_some();
+        if was_open && !self.dialog_taken_down.replace(false) {
+            window.close_dialog(cx);
+        }
+        let Some(session) = session.filter(|_| target.is_some()) else {
+            return;
+        };
+        self.dialog = target;
+        self.open_dialog(session, window, cx);
+    }
+
+    /// Shows the picker in the window's dialog layer: a dialog of its own, with no overlay (the picker
+    /// is not modal) and no footer (`ColorPickerSheet` has its own OK and Cancel).
+    fn open_dialog(&mut self, session: Entity<EditorSession>, window: &mut Window, cx: &mut App) {
+        let Some(title) = session
+            .read(cx)
+            .color_picker
+            .as_ref()
+            .map(|picker| picker.target.title())
+        else {
+            return;
+        };
+        let taken_down = Rc::new(Cell::new(false));
+        self.dialog_taken_down = taken_down.clone();
+        let finishing = session.clone();
+        let finish_flag = taken_down.clone();
+        let sheet = cx.new(|cx| {
+            ColorPickerSheet::new(
+                session.clone(),
+                move |commit, window, cx| {
+                    finishing.update(cx, |session, _| session.close_color_picker(commit));
+                    if !finish_flag.replace(true) {
+                        window.close_dialog(cx);
+                    }
+                },
+                window,
+                cx,
+            )
+        });
+        let (row_top, row_height) = canvas_row(f32::from(window.viewport_size().height));
+        let margin_top = row_top + ((row_height - PICKER_HEIGHT - DIALOG_TITLE_HEIGHT) / 2.0).max(0.0);
+        let cancel_session = session.clone();
+        let cancel_flag = taken_down.clone();
+        let close_session = session.clone();
+        let close_flag = taken_down.clone();
+        let dialog_sheet = sheet.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            // The builder runs on every frame, so the handlers it installs clone what they use.
+            let cancelling = cancel_session.clone();
+            let cancel_flag = cancel_flag.clone();
+            let closing = close_session.clone();
+            let close_flag = close_flag.clone();
+            let sheet = dialog_sheet.clone();
+            dialog
+                .title(div().pl(px(12.0)).child(title.clone()))
+                // The dialog's own padding would double the sheet's, and only its overlay would dim
+                // the editor the picker samples.
+                .p(px(0.0))
+                .pt(px(8.0))
+                .w(px(PICKER_WIDTH))
+                .margin_top(px(margin_top))
+                .overlay(false)
+                .overlay_closable(false)
+                // Escape and the close button are both a cancel: they close the picker through the
+                // session and take the dialog down with them, while it is still the dialog on top.
+                .on_cancel(move |_, window, cx| {
+                    cancelling.update(cx, |session, _| session.close_color_picker(false));
+                    if !cancel_flag.replace(true) {
+                        window.close_dialog(cx);
+                    }
+                    // Never let the library pop a second time: that would reach the dialog below.
+                    false
+                })
+                .on_close(move |_, window, cx| {
+                    closing.update(cx, |session, _| session.close_color_picker(false));
+                    if !close_flag.replace(true) {
+                        window.close_dialog(cx);
+                    }
+                })
+                .content(move |content, _, _| content.child(sheet.clone()))
+        });
+    }
+
     pub fn close(&mut self, window: &mut Window, cx: &mut App) {
+        self.title = None;
         self.panel.close(window, cx);
     }
 
     pub fn is_visible(&self) -> bool {
-        self.panel.is_visible()
+        self.panel.is_visible() || self.dialog.is_some()
     }
 
-    /// The panel for the host to draw at its window's root. The picker's window holds nothing but
-    /// this panel, so the whole of it is the space the panel is centred in.
-    pub fn render(&mut self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        let height = f32::from(window.viewport_size().height);
-        self.panel.render(0.0, height, window, cx)
+    /// The panel for the editor to draw, in the row the editor's other panels are centred in.
+    pub fn render(
+        &mut self,
+        row_top: f32,
+        row_height: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.panel.render(row_top, row_height, window, cx)
     }
 
-    /// Returns keyboard focus to the picker after a click on the canvas sampled a color.
+    /// Returns keyboard focus to the picker after a click on the canvas sampled a color
+    /// (`ColorPickerPanelController.refocus()`). The dialog host needs no such call: the dialog keeps
+    /// its own focus trap.
     pub fn refocus(window: &mut Window, cx: &mut App) {
         FloatingPanelController::refocus(Self::IDENTIFIER, window, cx);
     }

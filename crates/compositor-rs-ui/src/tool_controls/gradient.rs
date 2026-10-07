@@ -27,8 +27,9 @@ pub const FIELD_WIDTH: f32 = 42.0;
 pub const SWATCH_WIDTH: f32 = 56.0;
 pub const SWATCH_HEIGHT: f32 = 18.0;
 
-/// The side of the rail's own icons (`Canvas` fills the frame it is given).
-pub const ICON_SIZE: f32 = 16.0;
+/// The side of the rail's own icons (`Canvas` fills the frame it is given, and the Swift gives the
+/// four hand-drawn marks `.frame(width: 18, height: 18)`).
+pub const ICON_SIZE: f32 = 18.0;
 /// The dithering pattern's side: one cell per point inside the icon's frame.
 const PATTERN_SIZE: usize = 16;
 /// The dithered fade's frame radius (`cornerRadius: 3.5`).

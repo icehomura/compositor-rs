@@ -8,11 +8,19 @@ use compositor_rs_core::layer_shape::ShapeKind;
 use compositor_rs_core::selection::{LassoKind, WandMode};
 use compositor_rs_pixels::warp::{BlurToolMode, BrushToolMode};
 use compositor_rs_session::EditorSession;
+use std::sync::Arc;
 
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
 /// The status bar's text color: SwiftUI's `.secondary` on the editor's dark background.
 pub const SECONDARY: Hsla = hsla(0.0, 0.0, 1.0, 0.55);
+
+/// The bar's horizontal padding, `padding(.horizontal, 18)`.
+pub const PADDING: f32 = 18.0;
+
+/// The gap between the spinner and its label, the Swift's outer `HStack(spacing: 16)`.
+pub const SPINNER_GAP: f32 = 16.0;
 
 /// The status bar's height, `frame(height: 30)`.
 pub const HEIGHT: f32 = 30.0;
@@ -106,6 +114,12 @@ pub fn status_hint(session: &EditorSession) -> String {
     }
 }
 
+/// `.monospacedDigit()`: equal-width digits (OpenType `tnum`), so the zoom and the dimensions do
+/// not jitter as their numbers change.
+fn tabular_figures() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
+}
+
 /// The bar itself, on the component library's `StatusBar`.
 pub struct StatusBar {
     session: Entity<EditorSession>,
@@ -142,7 +156,7 @@ impl Render for StatusBar {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(SPINNER_GAP))
                 .child(progress_indicator())
                 .child(div().child("Working…"))
                 .into_any_element()
@@ -151,7 +165,7 @@ impl Render for StatusBar {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(SPINNER_GAP))
                 .child(progress_indicator())
                 .child(div().child("Importing images…"))
                 .into_any_element()
@@ -159,9 +173,22 @@ impl Render for StatusBar {
             div().child(status_hint(session)).into_any_element()
         };
 
+        let font = Font {
+            family: cx.theme().font_family.clone(),
+            features: tabular_figures(),
+            ..Font::default()
+        };
+        // The Swift bar is a bare `HStack` on the editor chrome — `padding(.horizontal, 18)` inside
+        // `frame(height: 30)`, no border and no background of its own — so the component's own
+        // frame (its padding, its top border and its panel background) is replaced outright.
         gpui_kit::component::status_bar::StatusBar::new()
+            .font(font)
             .text_size(px(11.0))
             .text_color(SECONDARY)
+            .px(px(PADDING))
+            .h(px(HEIGHT))
+            .border_0()
+            .bg(transparent_black())
             .left(left)
             .right(right)
     }

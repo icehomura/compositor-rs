@@ -34,6 +34,7 @@ use compositor_rs_session::projects::{PSDConversionRequest, RawDevelop, SessionH
 use compositor_rs_ui::ProjectWorkspaceView;
 use compositor_rs_ui::actions;
 use compositor_rs_ui::content_view::{MIN_HEIGHT, MIN_WIDTH};
+use compositor_rs_ui::panels::color_picker::ColorPickerPanelController;
 use compositor_rs_ui::panels::floating_panel::{FloatingPanelController, FloatingPanelPlacement};
 use compositor_rs_ui::sheets::canvas_size::CanvasSizeSheet;
 use compositor_rs_ui::sheets::grid_settings::GridSettingsSheet;
@@ -47,7 +48,7 @@ use compositor_rs_ui::workspace::ProjectWorkspace;
 
 use gpui_kit::base::GlobalState;
 use gpui_kit::component::menu::AppMenuBar;
-use gpui_kit::component::{Theme, ThemeMode, TitleBar, v_flex};
+use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -143,6 +144,9 @@ struct AppRoot {
     observed: HashMap<Id, Subscription>,
     /// `ShortcutSettings.show()`'s panel.
     keyboard_shortcuts: FloatingPanelController,
+    /// The app's Color Picker, while the picker has to float above a dialog. The editor hosts its
+    /// own panel for the colors that are sampled from the canvas (`ContentView`).
+    color_picker: ColorPickerPanelController,
     /// `ProjectController.exportJPEG`'s sheet, while its card is up.
     jpeg_export: Option<Entity<JpegExportSheet>>,
     /// `ProjectTabs`' PSD conversion sheet, shown while the session says so.
@@ -168,6 +172,7 @@ impl AppRoot {
             menu_state: None,
             observed: HashMap::new(),
             keyboard_shortcuts: FloatingPanelController::new("keyboardShortcuts"),
+            color_picker: ColorPickerPanelController::new(),
             jpeg_export: None,
             psd_conversion: None,
             raw_develop: None,
@@ -583,6 +588,15 @@ impl AppRoot {
         );
     }
 
+    /// The Color Picker's second host: the window's dialog layer, which is the only place that draws
+    /// over a dialog. Used for the picker a dialog's own swatch opened, and for any picker while a
+    /// dialog is up (`ContentView` hosts the editor's panel for the rest).
+    fn sync_color_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.current_session(cx, false);
+        let dialog_up = window.has_active_dialog(cx);
+        self.color_picker.sync_dialog(session, dialog_up, window, cx);
+    }
+
     /// The PSD conversion and Camera Raw sheets, which `ProjectTabs` shows for the front tab.
     fn sync_sheets(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.current_session(cx, false) else {
@@ -739,6 +753,7 @@ impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_menus(cx);
         self.sync_sheets(cx);
+        self.sync_color_picker(window, cx);
         self.observe_tabs(cx);
 
         // The shortcuts sheet is centred on the window below its title bar.

@@ -399,7 +399,7 @@ impl Render for TransformInspector {
             self.update_field(field, window, cx);
         }
 
-        let (targets_mask, auto_select, shows_controls, locks_ratio, sampling, pending, has_edit) = {
+        let (targets_mask, auto_select, shows_controls, locks_ratio, sampling, pending, has_edit, fields_on) = {
             let session = self.session.read(cx);
             (
                 session.transform_targets_mask(),
@@ -409,6 +409,12 @@ impl Render for TransformInspector {
                 self.value(cx).sampling,
                 session.transform_edit.as_ref().is_some_and(|edit| edit.persistent),
                 session.transform_edit.is_some(),
+                // `(!canTransform && edit == nil) || edit.corners != nil` inverted.
+                (session.can_transform() || session.transform_edit.is_some())
+                    && !session
+                        .transform_edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.corners.is_some()),
             )
         };
         // `HeldModifiers`: Command flips Auto Select while it is held, and the box shows it flipped;
@@ -491,6 +497,8 @@ impl Render for TransformInspector {
                                 Button::new("transform-lock-ratio")
                                     .icon(Icon::new(IconName::Link))
                                     .selected(locks_shown)
+                                    // The Swift `.disabled(_:)` covers the lock and the rest of the row.
+                                    .disabled(!fields_on)
                                     .tooltip("Lock aspect ratio. Hold Shift while dragging a handle to turn it the other way.")
                                     .accessibility_label("Lock aspect ratio")
                                     .on_click(move |event: &ClickEvent, window, cx| {
@@ -510,6 +518,7 @@ impl Render for TransformInspector {
                                     .label(sampling.raw_value())
                                     .icon(Icon::new(IconName::ChevronDown).size(px(9.0)))
                                     .w(px(SAMPLING_WIDTH))
+                                    .disabled(!fields_on)
                                     .dropdown_menu(move |menu: PopupMenu, _window, _cx| {
                                         LayerSampling::ALL.into_iter().fold(menu, |menu, option| {
                                             let entity = sampling_entity.clone();
@@ -531,6 +540,7 @@ impl Render for TransformInspector {
                             .child(
                                 Button::new("transform-flip-h")
                                     .label("Flip H")
+                                    .disabled(!fields_on)
                                     .on_click(move |_, _, cx| {
                                         flip_h_entity.update(cx, |inspector, cx| {
                                             inspector.change(
@@ -543,6 +553,7 @@ impl Render for TransformInspector {
                             .child(
                                 Button::new("transform-flip-v")
                                     .label("Flip V")
+                                    .disabled(!fields_on)
                                     .on_click(move |_, _, cx| {
                                         flip_v_entity.update(cx, |inspector, cx| {
                                             inspector.change(

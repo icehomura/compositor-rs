@@ -12,6 +12,7 @@ use compositor_rs_session::EditorSession;
 
 use crate::canvas::canvas_view::CanvasView;
 use crate::canvas::rulers::{CanvasRuler, CanvasRulerCorner, CanvasRulerView};
+use crate::panels::color_picker::ColorPickerPanelController;
 use crate::panels::floating_panel::{FloatingPanelController, FloatingPanelPlacement};
 use crate::panels::layer_mask_menu::MaskAloneBadge;
 use crate::panels::layers_panel::LayersPanel;
@@ -30,7 +31,10 @@ use crate::tool_controls::lasso::LassoControls;
 use crate::tool_controls::navigation::NavigationToolHeader;
 use crate::tool_controls::shape::ShapeControls;
 use crate::tool_controls::type_tool::TypeControls;
-use crate::tool_header::{tool_header_title_bar, ToolHeaderStyle, TOOL_HEADER_HEIGHT, TOOL_HEADER_PADDING};
+use crate::tool_header::{
+    tool_header_bar, tool_header_spacer, tool_header_title, tool_header_title_bar, ToolHeaderStyle,
+    TOOL_HEADER_HEIGHT, TOOL_HEADER_PADDING,
+};
 use crate::toolbar::status_bar::{self, StatusBar};
 use crate::toolbar::tool_rail::ToolRail;
 use crate::widgets::indicatorless_scroll::IndicatorlessScrollView;
@@ -41,11 +45,16 @@ use compositor_rs_core::image_ops::FilterKind;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// The editor's backdrop (`Color(white: 0.14)`).
 pub const EDITOR_BACKDROP: Hsla = hsla(0.0, 0.0, 0.14, 1.0);
+
+/// The thickness of the `Divider()`s the Swift stacks between the header, the canvas row and the
+/// status bar — they come out of the canvas row's height, as they do there.
+pub const DIVIDER_HEIGHT: f32 = 1.0;
 
 /// The Layers panel's width key (`@AppStorage("layersPanelWidth")`).
 pub const LAYERS_PANEL_WIDTH_KEY: &str = "layersPanelWidth";
@@ -83,6 +92,10 @@ pub struct ContentView {
     effects_panel: FloatingPanelController,
     selection_amount_panel: FloatingPanelController,
     filter_panel: FloatingPanelController,
+    /// The app's Color Picker, which the palette and the tool bars open (Swift
+    /// `ColorPaletteControls` owns its controller; here the editor hosts the panel and the window
+    /// host the dialog, see [`ColorPickerPanelController`]).
+    color_picker_panel: ColorPickerPanelController,
     /// The welcome sheet an empty tab shows over the canvas (`welcome`).
     new_canvas_sheet: Entity<NewCanvasSheet>,
 }
@@ -125,6 +138,7 @@ impl ContentView {
             effects_panel: FloatingPanelController::new("effectsPanel"),
             selection_amount_panel: FloatingPanelController::new("selectionAmountPanel"),
             filter_panel: FloatingPanelController::new("filterPanel"),
+            color_picker_panel: ColorPickerPanelController::new(),
             new_canvas_sheet,
         }
     }
@@ -318,6 +332,12 @@ impl ContentView {
         } else {
             self.filter_panel.close(window, cx);
         }
+
+        // The app's Color Picker: a color the canvas can be sampled for is picked in the editor's own
+        // panel, while a picker opened from a dialog is hosted by the window's dialog layer instead
+        // (`AppRoot::sync_color_picker`), because the editor's panels draw below it.
+        let dialog_up = window.has_active_dialog(cx);
+        self.color_picker_panel.sync(session, dialog_up, window, cx);
     }
 
     /// The panel each sheet is shown in.
@@ -328,7 +348,7 @@ impl ContentView {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
-        [
+        let mut panels: Vec<AnyElement> = [
             &mut self.levels_panel,
             &mut self.adjustment_panel,
             &mut self.color_range_panel,
@@ -338,7 +358,9 @@ impl ContentView {
         ]
         .into_iter()
         .filter_map(|panel| panel.render(row_top, row_height, window, cx))
-        .collect()
+        .collect();
+        panels.extend(self.color_picker_panel.render(row_top, row_height, window, cx));
+        panels
     }
 
     /// `PanelResizeEdge`: the divider that resizes the panel to its right.
@@ -477,7 +499,8 @@ impl Render for ContentView {
             - crate::workspace::TAB_STRIP_HEIGHT)
             .max(MIN_HEIGHT);
         let header_height = if Self::has_header(tool) { TOOL_HEADER_HEIGHT } else { 0.0 };
-        let row_height = (editor_height - header_height - status_bar::HEIGHT).max(0.0);
+        let dividers = if header_height > 0.0 { 2.0 } else { 1.0 } * DIVIDER_HEIGHT;
+        let row_height = (editor_height - header_height - status_bar::HEIGHT - dividers).max(0.0);
         // The panels' own elements are drawn last, so they sit over the editor (`FloatingPanelController`).
         let panels = self.panels(header_height, row_height, window, cx);
         let session = self.session.read(cx);
@@ -518,26 +541,39 @@ impl Render for ContentView {
             )
         {
             let view = self.header(tool, cx);
-            Some(div().child(view).child(divider()).into_any_element())
+            Some(div().child(view).child(divider_h()).into_any_element())
         } else if tool == NavigationTool::Eyedropper {
+            // `HStack(spacing: 16) { title, Toggle("Sample Ring"), Spacer() }`: the checkbox sits
+            // next to the title, and there is one trailing spacer — not the two a title bar's own
+            // spacer plus another would give, which would centre it.
             let session = self.session.clone();
             Some(
-                tool_header_title_bar("Eyedropper")
+                div()
                     .child(
-                        Checkbox::new("sample-ring")
-                            .label("Sample Ring")
-                            .checked(shows_sample_ring)
-                            .on_click(move |value, _, cx| {
-                                let value = *value;
-                                session.update(cx, |session, _| session.shows_sample_ring = value);
-                            }),
+                        tool_header_bar(16.0)
+                            .child(tool_header_title("Eyedropper"))
+                            .child(
+                                Checkbox::new("sample-ring")
+                                    .label("Sample Ring")
+                                    .checked(shows_sample_ring)
+                                    .on_click(move |value, _, cx| {
+                                        let value = *value;
+                                        session.update(cx, |session, _| session.shows_sample_ring = value);
+                                    }),
+                            )
+                            .child(tool_header_spacer()),
                     )
-                    .child(div().flex_1())
+                    .child(divider_h())
                     .into_any_element(),
             )
         } else {
             // No tool (A) keeps the header, so the canvas doesn't jump.
-            Some(tool_header_title_bar("Select a tool").into_any_element())
+            Some(
+                div()
+                    .child(tool_header_title_bar("Select a tool"))
+                    .child(divider_h())
+                    .into_any_element(),
+            )
         };
 
         let canvas_area = div()
@@ -618,7 +654,7 @@ impl Render for ContentView {
                     .child(self.resize_edge(cx))
                     .child(div().w(px(panel_width as f32)).h_full().child(self.layers_panel.clone())),
             )
-            .child(divider())
+            .child(divider_h())
             .child(self.status_bar.clone())
             .children(panels)
             .when(is_drop_targeted, |this| {
@@ -688,7 +724,6 @@ fn divider() -> impl IntoElement {
 fn divider_h() -> impl IntoElement {
     div().h(px(1.0)).w_full().bg(hsla(0.0, 0.0, 1.0, 0.10))
 }
-
 /// The size a canvas area is given, for the sheets that need the window's own geometry.
 pub fn canvas_area_size(size: Size) -> Size {
     size

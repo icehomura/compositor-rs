@@ -27,9 +27,10 @@ use compositor_rs_session::projects::SessionHost;
 use compositor_rs_session::EditorSession;
 
 use crate::canvas::overlays::brush_cursor::brush_cursor;
-use crate::canvas::overlays::canvas_lines::canvas_lines;
+use crate::canvas::overlays::canvas_lines::{canvas_lines, LinesPhase};
 use crate::canvas::overlays::sample_ring::{sample_ring, SampleRingState};
 use crate::canvas::overlays::transform::{crop_resize_regions, transform_overlay};
+use crate::panels::color_picker::ColorPickerPanelController;
 
 use gpui_kit::*;
 // gpui's own point, in window pixels, as opposed to core's `Point` (view and document space, in
@@ -468,13 +469,18 @@ impl CanvasView {
             foreground: session.foreground_color(),
             shape_line_width: session.shape_line_width,
             active_layer: session.active_layer_id,
+            // `renderBounds`: while the crop tool is up the backdrop follows `document ∪ cropRect`.
+            render_bounds: session.visible_crop_rect().map(|rect| {
+                let document = Rect::new(0.0, 0.0, size.width, size.height);
+                rect.union(document)
+            }),
             ..CompositeState::default()
         };
         Composite::draw_view(document, &viewport, pixels, &mut target, &state);
         if session.pixel_grid_visible() {
             let mut canvas = Canvas::from_rgba(target);
             let view = Rect::new(0.0, 0.0, pixels.width, pixels.height);
-            Composite::draw_pixel_grid(document, &viewport, view, &mut canvas);
+            Composite::draw_pixel_grid(document, &viewport, device, view, &mut canvas);
             target = canvas.into_rgba();
         }
         // GPUI paints `RenderImage`s; the pixels reach it as PNG, the one image format the toolkit
@@ -977,8 +983,12 @@ impl CanvasView {
             }
             Some(Drag::Pan) | None => {}
             Some(Drag::Sampling) => {
-                // `if samplingColor { samplingColor = false; … }`.
+                // `if samplingColor { samplingColor = false; … }`, and the picker takes focus back
+                // so the panel keeps working after the click that sampled from the canvas.
                 self.sampling_point = None;
+                if self.session.read(cx).color_picker.is_some() {
+                    ColorPickerPanelController::refocus(window, cx);
+                }
             }
         }
         self.last_drag_point = None;
@@ -1257,8 +1267,9 @@ impl Render for CanvasView {
     }
 }
 
-/// The overlays stacked over the composite, back to front: the lines (guides and marching ants),
-/// the transform box, the brush cursor and the sample ring.
+/// The overlays stacked over the composite, back to front: the lines under the transform box (layout
+/// grid, guides, text box draft), the transform box, the lines over it (marching ants, lasso draft,
+/// snap guides), the brush cursor and the sample ring.
 fn overlay_stack(
     session: &Entity<EditorSession>,
     hardness: Option<f64>,
@@ -1266,8 +1277,9 @@ fn overlay_stack(
     sample_ring_state: Option<SampleRingState>,
 ) -> Vec<AnyElement> {
     vec![
-        canvas_lines(session.clone(), text_box_rect).into_any_element(),
+        canvas_lines(session.clone(), text_box_rect, LinesPhase::Below).into_any_element(),
         transform_overlay(session.clone()).into_any_element(),
+        canvas_lines(session.clone(), None, LinesPhase::Above).into_any_element(),
         brush_cursor(session.clone(), hardness).into_any_element(),
         sample_ring_state
             .map(|state| sample_ring(state).into_any_element())

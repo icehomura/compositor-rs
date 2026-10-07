@@ -42,14 +42,34 @@ const LASSO_INNER_WIDTH: f32 = 1.0;
 /// The polygonal first corner's handle (`CGRect(x: first.x - 4, …, width: 8, height: 8)`).
 const LASSO_HANDLE: f64 = 8.0;
 
+/// Which side of the transform box a [`canvas_lines`] layer belongs on.
+///
+/// The Swift splits these between two NSViews: `CanvasLinesOverlay` carries the text box draft (and
+/// the pixel grid), and is added *below* `TransformOverlay`; the transform overlay itself draws the
+/// layout grid and guides before its handles, then the ants, the lasso draft and the snap guides
+/// after them (`TransformOverlay.draw`). The port keeps them all in one element, so the caller
+/// stacks one layer of each phase around the transform overlay to keep the same z order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LinesPhase {
+    /// The layout grid, the guides and the text box draft — under the transform handles.
+    Below,
+    /// The marching ants, the lasso draft and the snap guides — over the transform handles.
+    Above,
+}
+
 /// The canvas's line overlays, drawn in one element above the composite.
 ///
 /// `text_box_rect` is the box the Type tool is dragging out (`CanvasView.textBoxRect`, document
 /// pixels): view state the canvas passes in, as the Swift's `drawLines(in:)` read it.
-pub fn canvas_lines(session: Entity<EditorSession>, text_box_rect: Option<Rect>) -> CanvasLines {
+pub fn canvas_lines(
+    session: Entity<EditorSession>,
+    text_box_rect: Option<Rect>,
+    phase: LinesPhase,
+) -> CanvasLines {
     CanvasLines {
         session,
         text_box_rect,
+        phase,
     }
 }
 
@@ -57,6 +77,7 @@ pub fn canvas_lines(session: Entity<EditorSession>, text_box_rect: Option<Rect>)
 pub struct CanvasLines {
     session: Entity<EditorSession>,
     text_box_rect: Option<Rect>,
+    phase: LinesPhase,
 }
 
 impl RenderOnce for CanvasLines {
@@ -125,43 +146,49 @@ impl RenderOnce for CanvasLines {
                 let width = f64::from(bounds.size.width);
                 let height = f64::from(bounds.size.height);
 
-                if let Some(grid) = &grid {
-                    paint_layout_grid(&viewport, document_size, grid, origin, window);
-                }
-                if let Some(guides) = &guides {
-                    paint_guides(&viewport, document_size, guides, origin, width, height, window);
-                }
-                if let Some(path) = &selection {
-                    let phase = {
-                        let now = cx.background_executor().now();
-                        let elapsed = now.duration_since(clock.read(cx).started).as_secs_f64();
-                        ((elapsed / ANTS_PERIOD) % ANTS_CYCLE) as f32
-                    };
-                    paint_selection(&viewport, document_size, path, origin, phase, window);
-                    window.request_animation_frame();
-                }
-                if let Some(draft) = &lasso {
-                    paint_lasso_draft(&viewport, document_size, draft, origin, window);
-                }
-                if let Some((xs, ys)) = &snap_guides {
-                    paint_snap_guides(&viewport, document_size, xs, ys, origin, accent, window);
+                let below = self.phase == LinesPhase::Below;
+                if below {
+                    if let Some(grid) = &grid {
+                        paint_layout_grid(&viewport, document_size, grid, origin, window);
+                    }
+                    if let Some(guides) = &guides {
+                        paint_guides(&viewport, document_size, guides, origin, width, height, window);
+                    }
+                } else {
+                    if let Some(path) = &selection {
+                        let phase = {
+                            let now = cx.background_executor().now();
+                            let elapsed = now.duration_since(clock.read(cx).started).as_secs_f64();
+                            ((elapsed / ANTS_PERIOD) % ANTS_CYCLE) as f32
+                        };
+                        paint_selection(&viewport, document_size, path, origin, phase, window);
+                        window.request_animation_frame();
+                    }
+                    if let Some(draft) = &lasso {
+                        paint_lasso_draft(&viewport, document_size, draft, origin, window);
+                    }
+                    if let Some((xs, ys)) = &snap_guides {
+                        paint_snap_guides(&viewport, document_size, xs, ys, origin, accent, window);
+                    }
                 }
                 // `drawLines(in:)`'s tail: `drawTextBoxDraft()`.
-                if let Some(rect) = text_box_rect {
-                    let scale = viewport.points_per_pixel();
-                    let view_origin = viewport.view_point(rect.origin, document_size);
-                    stroke_rect(
-                        window,
-                        origin,
-                        Rect::new(
-                            view_origin.x,
-                            view_origin.y,
-                            rect.width() * scale,
-                            rect.height() * scale,
-                        ),
-                        1.0,
-                        accent.into(),
-                    );
+                if below {
+                    if let Some(rect) = text_box_rect {
+                        let scale = viewport.points_per_pixel();
+                        let view_origin = viewport.view_point(rect.origin, document_size);
+                        stroke_rect(
+                            window,
+                            origin,
+                            Rect::new(
+                                view_origin.x,
+                                view_origin.y,
+                                rect.width() * scale,
+                                rect.height() * scale,
+                            ),
+                            1.0,
+                            accent.into(),
+                        );
+                    }
                 }
             },
         )

@@ -15,7 +15,8 @@ use gpui_kit::*;
 use crate::tool_controls::segmented_picker;
 
 /// The box the rail's icons are drawn in (the Swift `Canvas` fills the frame it is given).
-pub const ICON_SIZE: f32 = 16.0;
+/// The side of the rail's own icons (`.frame(width: 18, height: 18)` in the Swift).
+pub const ICON_SIZE: f32 = 18.0;
 
 /// A rubber stamp for the tool rail (SF Symbols has none): round handle, neck, body, and pad.
 pub struct CloneStampToolIcon;

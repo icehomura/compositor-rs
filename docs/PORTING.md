@@ -70,6 +70,33 @@ Dependency direction (no cycles): `core ← pixels ← render ← session ← io
 | `ProjectController`'s reference to its `EditorSession` | the session is a parameter (`&mut EditorSession` / `&EditorSession`) on every controller method, because the port's session is owned by a gpui `Entity` in the UI | same flows, same question order, same wording; the app answers `ProjectPrompter` by replaying the operation with the answers recorded, since gpui's native dialogs are asynchronous |
 | `Task`/`async` UI coordination (`CheckedContinuation` waiters, busy flag) | synchronous commands + a `Busy` flag on `EditorSession`; background work through `rayon`/`std::thread` with a completion queue drained on the UI thread | observable states (`showsBusy`, `isProjectBusy`, `canUndo`, …) preserved |
 
+### The Color Picker's window
+
+Swift puts the picker in an `NSPanel` (a real window) that floats above the document *and* above every sheet, and
+can be dragged anywhere. gpui has no second window layer here, so the port hosts the same `ColorPickerSheet` in
+whichever of the two surfaces that window would have been above:
+
+* the editor is on top → the picker is one of `ContentView`'s floating panels (canvas-centred, draggable,
+  position remembered, canvas still clickable so a color can be sampled);
+* a dialog is on top (a picker a dialog's own swatch opened, or any picker while a dialog came up) → the picker
+  is a dialog of the window's own layer, stacked above it (`AppRoot::sync_color_picker`).
+
+The two conditions are complementary and derived from the session, not stored. Known deviations, all caused by
+the substitution:
+
+* a gpui dialog cannot be dragged, so the dialog-hosted picker reappears where it is centred;
+* the dialog layer's full-viewport hit box swallows clicks, so while a dialog is on top the canvas can no longer
+  be sampled — the Swift's own "Click the canvas to sample" hint says there is nothing to sample there;
+* a dialog opened *above* the picker's dialog leaves the picker's dialog on the stack when the picker closes
+  (`close_dialog` pops the topmost); it is left empty and still dismissable through its own OK/Cancel/close;
+* the PSD-conversion, Camera Raw and JPEG-export sheets are drawn by `AppRoot` rather than the dialog layer, so
+  they paint over the editor-hosted picker. They only appear during import/export, when no picker is up.
+
+The picker keeps its own OK/Cancel and its title-bar close button (the analogue of the Swift panel's header ✕);
+Escape, the close button and the button pair all cancel through `close_color_picker(false)`, and OK commits with
+`close_color_picker(true)`. `ColorPickerSheet` is unchanged otherwise — same layout, same 538 pt fitting width,
+same fields, same footer hint.
+
 ## 5. Persistence
 
 `docs/project-format.md` is normative. `compositor-rs-io::project_store` reads versions 1–11 and writes 11, with the
